@@ -4,7 +4,7 @@ from ray import tune
 from ray.tune import grid_search
 from ray.tune.schedulers import ASHAScheduler
 from ray.tune.registry import register_env
-from traffic_env import TrafficSignalEnv
+from traffic_env import TrafficSignalEnv, REPO_ROOT, CONFIGS_DIR, DATA_DIR
 import warnings
 import os
 import csv
@@ -12,12 +12,15 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 os.environ["RLLIB_DISABLE_NEW_API_STACK"] = "True"
-training_logs = Path("../logs/training_logs").resolve().as_posix()
-tuning_logs = Path("../logs/tuning_logs").resolve().as_posix()
+training_logs = (REPO_ROOT / "logs" / "training_logs").as_posix()
+tuning_logs = (REPO_ROOT / "logs" / "tuning_logs").as_posix()
+model_dir = (REPO_ROOT / "models" / "ppo_trained_model").as_posix()
 
 # Define environment configuration
 env_config = {
     "max_steps": 1000,
+    # Several env runners would otherwise all write to the same replay file.
+    "save_replay": False,
 }
 
 # Register custom environment
@@ -64,7 +67,7 @@ def train_PPO():
 
     # Training loop
     # with open("../logs/training_logs/training_log.txt", "w") as log_file:
-    with open("../logs/training_logs/training_data.csv", "w", newline="") as data_file:
+    with open(Path(training_logs) / "training_data.csv", "w", newline="") as data_file:
         writer = csv.writer(data_file)
         writer.writerow(["Training Iteration", "Mean Reward"])
         for i in range(50): # Number of training iterations
@@ -101,7 +104,7 @@ def train_PPO():
             # log_file.write(f"\t\tSteps Sampled: " + str(result["num_env_steps_sampled"]) + " (progress of sampling in environment)")
             # log_file.write(f"\t\tThroughput: " + str(result["timers"]["learn_throughput"]) + " steps/s (measures training throughput, reflecting efficiency)")
 
-    ppo.save("../models/ppo_trained_model")
+    ppo.save(model_dir)
 
 def tune_PPO():
     def trainable(config):
@@ -137,7 +140,7 @@ def tune_PPO():
         "lr": tune.loguniform(1e-5, 1e-3),
         "train_batch_size": tune.choice([1024, 2048]),
         "num_sgd_iter": tune.choice([5, 10, 20]),
-        "env_config": {"max_steps": 1000}, # Example environment config
+        "env_config": env_config, # Example environment config
         "policies": {
             f"agent_{i}": (None, env.observation_space[f"agent_{i}"], env.action_space[f"agent_{i}"], {}) for i in range(env.num_intersections)
         },
@@ -209,11 +212,12 @@ def tune_hyperparameters():
 
 def evaluate_policy():
     ppo = PPO(config=ppo_config)
-    ppo.restore("../models/ppo_trained_model")
+    ppo.restore(model_dir)
 
     env_config = {
         "max_steps": 1000,
-        "config_file": "../configs/evaluation/evaluation_config.json"
+        "config_file": CONFIGS_DIR / "evaluation" / "evaluation_config.json",
+        "save_replay": True,
     }
 
     # Register custom environment
@@ -229,7 +233,7 @@ def evaluate_policy():
     done = False
     step = 0
 
-    with open("../data/ppo_rewards.csv", mode="w", newline="") as file:
+    with open(DATA_DIR / "ppo_rewards.csv", mode="w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(["Step", "Total Reward"])
         while not done:

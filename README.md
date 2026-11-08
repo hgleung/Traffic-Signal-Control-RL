@@ -30,39 +30,52 @@ The project provides a comparison between a rule-based fixed signal control base
 
 ## Getting Started
 ### Prerequisites
-- Python 3.10+
-- [CityFlow traffic simulator](https://cityflow-project.github.io/)
+- Python 3.10 (Ray 2.39 and the CityFlow build are tested against it)
+- A C++ toolchain and CMake, to build [CityFlow](https://cityflow-project.github.io/) (it is not on PyPI)
 
 ### Installation
-1. Clone the repository:
-   ```bash
-   git clone <repo_url>
-   cd Traffic-Signal-Control-RL
-   ```
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+**Option A: Docker (recommended).** Builds CityFlow and all dependencies in one step:
+```bash
+docker build -t traffic-rl .
+docker run --rm traffic-rl            # runs the smoke test
+docker run --rm -it traffic-rl bash   # interactive shell
+```
+
+**Option B: local virtual environment.**
+```bash
+git clone <repo_url>
+cd Traffic-Signal-Control-RL
+python3.10 -m venv venv && source venv/bin/activate
+pip install "git+https://github.com/cityflow-project/CityFlow.git@81ee0f47659ca66177a71f81676691c58ee89184"
+pip install -r requirements.txt
+pytest -q tests                        # smoke test: one short episode end to end
+```
+`requirements-freeze-2024.txt` is the original full `pip freeze` from the class project, kept for reference.
+
+Scripts resolve config, data, log and model paths from the repository root, so they can be run from any directory.
 
 ### Running Experiments
 #### 1. Baseline: Fixed Signal Control
-Run the fixed signal control simulation from the notebook or script:
+```bash
+python scripts/traffic_env.py
+```
+or from Python:
 ```python
 from traffic_env import TrafficSignalEnv, fixed_signal_control
-# ... (see notebooks/project.ipynb)
+env = TrafficSignalEnv(max_steps=1000)
 fixed_rewards = fixed_signal_control(env)
 ```
 
-#### 2. RL Agent: PPO
-Train or evaluate the PPO agent:
-```bash
-python scripts/ppo.py
-```
-Or run evaluation:
+#### 2. RL Agent: PPO (RLlib, multi-agent)
+Training, tuning and evaluation live in `scripts/traffic_env_ppo.py` (`train_PPO()`, `tune_hyperparameters()`, `evaluate_policy()`).
 ```python
-from traffic_env_ppo import evaluate_policy
+from traffic_env_ppo import train_PPO, evaluate_policy
+train_PPO()
 ppo_rewards = evaluate_policy()
 ```
+> **Note:** the checkpoint in `models/ppo_trained_model` was trained with one agent per intersection *including* the six virtual (light-less) entry points. The environment now only creates agents for the two signalised intersections, so that checkpoint no longer loads and the model needs to be retrained.
+
+`scripts/ppo.py` is a single-agent CleanRL PPO reference implementation and is not wired to this environment.
 
 #### 3. Visualize Results
 Use the notebook or `scripts/results/create_graph.py` to visualize reward curves:
