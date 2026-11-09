@@ -27,7 +27,8 @@ from gymnasium import spaces
 
 from controllers import CLEARANCE_PHASE
 from scenarios import generate_flow
-from traffic_env import TrafficSignalEnv
+from scenarios import NETWORKS
+from traffic_env import CONFIGS_DIR, TrafficSignalEnv
 
 LANE_SCALE = 10.0
 TRAIN_SEEDS = range(1000, 1050)
@@ -36,8 +37,11 @@ TRAIN_SEEDS = range(1000, 1050)
 class TimedSignalEnv(TrafficSignalEnv):
     def __init__(self, horizon=3600, decision_interval=5, min_green=10, clearance=5, reward="queue",
                  flow_file=None, seed=None, train_levels=("low", "medium", "high"), train_seeds=TRAIN_SEEDS,
-                 rng_seed=None, save_replay=False, **kwargs):
+                 rng_seed=None, save_replay=False, network="1x2", neighbors=False, **kwargs):
         self.horizon = horizon
+        self.network = network
+        if "config_file" not in kwargs:
+            kwargs["config_file"] = CONFIGS_DIR / NETWORKS[network]["config"]
         self.fixed_scenario = flow_file is not None
         self.train_levels = list(train_levels)
         self.train_seeds = list(train_seeds)
@@ -62,10 +66,18 @@ class TimedSignalEnv(TrafficSignalEnv):
         for idx, intersection in enumerate(self.intersections):
             out_roads = [r for r in intersection["roads"] if r not in self.incoming_roads[idx]]
             self.outgoing_lanes.append([lane for road in out_roads for lane in self.roads[road]])
-        n_lanes = max(len(lanes) for lanes in self.incoming_lanes)
+        self.n_lanes = max(len(lanes) for lanes in self.incoming_lanes)
         # Per incoming lane: vehicle count and waiting count; then current-phase
         # one-hot, "can switch now" and "in clearance" flags.
-        self.obs_size = 2 * n_lanes + self.num_green + 2
+        self.obs_size = 2 * self.n_lanes + self.num_green + 2
+        # Optional neighbour information: for each direction (east, north, west,
+        # south), the waiting vehicles on each incoming road of the adjacent
+        # signalised intersection (zeros where there is none). This lets an agent
+        # see queues building up next door before they reach it.
+        self.neighbors = neighbors
+        self.neighbor_of = self._find_neighbors()
+        if neighbors:
+            self.obs_size += 4 * 4
         self.observation_space = spaces.Dict({
             agent: spaces.Box(low=0.0, high=np.inf, shape=(self.obs_size,), dtype=np.float32) for agent in self.agents
         })
@@ -75,7 +87,7 @@ class TimedSignalEnv(TrafficSignalEnv):
     def _sample_scenario(self):
         level = self.train_levels[self.rng.integers(len(self.train_levels))]
         seed = int(self.train_seeds[self.rng.integers(len(self.train_seeds))])
-        return generate_flow(level, seed, self.horizon, cache=True), seed
+        return generate_flow(level, seed, self.horizon, cache=True, network=self.network), seed
 
     # ------------------------------------------------------------------ gym API
     def reset(self, *, seed=None, options=None):
@@ -138,21 +150,48 @@ class TimedSignalEnv(TrafficSignalEnv):
         return self._observations(), rewards, terminateds, truncateds, {}
 
     # ------------------------------------------------------------------ helpers
+    def _find_neighbors(self):
+        """neighbor_of[idx][d] = index of the signalised intersection reached by
+        leaving idx in direction d (0 east, 1 north, 2 west, 3 south), or None."""
+        index = {intersection["id"]: k for k, intersection in enumerate(self.intersections)}
+        with open(self.road_network_file) as f:
+            import json
+            roads = {r["id"]: r for r in json.load(f)["roads"]}
+        result = []
+        for idx, intersection in enumerate(self.intersections):
+            row = [None] * 4
+            for road_id in intersection["roads"]:
+                road = roads[road_id]
+                if road["startIntersection"] == intersection["id"] and road["endIntersection"] in index:
+                    direction = int(road_id.rsplit("_", 1)[1])
+                    if 0 <= direction < 4:
+                        row[direction] = index[road["endIntersection"]]
+            result.append(row)
+        return result
+
     def _observations(self):
         counts = self.engine.get_lane_vehicle_count()
         waiting = self.engine.get_lane_waiting_vehicle_count()
         obs = {}
+        n_lanes = self.n_lanes
         for idx, agent in enumerate(self.agents):
             lanes = self.incoming_lanes[idx]
             vec = np.zeros(self.obs_size, dtype=np.float32)
             n = len(lanes)
             vec[:n] = [counts.get(l, 0) / LANE_SCALE for l in lanes]
-            n_lanes = (self.obs_size - self.num_green - 2) // 2
             vec[n_lanes:n_lanes + n] = [waiting.get(l, 0) / LANE_SCALE for l in lanes]
             phase = self.next_phase[idx] if self.clearance_left[idx] > 0 else self.phase[idx]
-            vec[2 * n_lanes + phase - 1] = 1.0
-            vec[-2] = float(self.clearance_left[idx] == 0 and self.green_elapsed[idx] >= self.min_green)
-            vec[-1] = float(self.clearance_left[idx] > 0)
+            base = 2 * n_lanes
+            vec[base + phase - 1] = 1.0
+            vec[base + self.num_green] = float(self.clearance_left[idx] == 0 and self.green_elapsed[idx] >= self.min_green)
+            vec[base + self.num_green + 1] = float(self.clearance_left[idx] > 0)
+            if self.neighbors:
+                offset = base + self.num_green + 2
+                for d, other in enumerate(self.neighbor_of[idx]):
+                    if other is None:
+                        continue
+                    for k, road in enumerate(self.incoming_roads[other][:4]):
+                        vec[offset + 4 * d + k] = sum(waiting.get(l, 0) for l in self.roads[road]) / LANE_SCALE
             obs[agent] = vec
         return obs
 

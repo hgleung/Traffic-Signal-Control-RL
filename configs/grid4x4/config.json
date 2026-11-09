@@ -1,0 +1,12 @@
+{
+	"interval": 1.0,
+	"seed": 0,
+	"dir": "../configs/",
+	"roadnetFile": "grid4x4/roadnet.json",
+	"flowFile": "grid4x4/flow.json",
+	"rlTrafficLight": true,
+	"laneChange": false,
+	"saveReplay": false,
+	"roadnetLogFile": "../logs/grid4x4/roadnet_log.json",
+	"replayLogFile": "../logs/grid4x4/replay.txt"
+}

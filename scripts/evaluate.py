@@ -25,11 +25,12 @@ from pathlib import Path
 import numpy as np
 
 from controllers import BASELINES
-from scenarios import DEMAND_LEVELS, ORIGINAL_SCENARIO, generate_flow
+from scenarios import DEMAND_LEVELS, NETWORKS, ORIGINAL_SCENARIO, generate_flow
 from signal_env import TimedSignalEnv
-from traffic_env import REPO_ROOT, TrafficSignalEnv
+from traffic_env import CONFIGS_DIR, REPO_ROOT, TrafficSignalEnv
 
-METRICS = ["avg_travel_time_s", "avg_queue", "throughput", "completion_rate", "total_reward"]
+METRICS = ["avg_travel_time_s", "avg_queue", "throughput", "completion_rate", "p95_wait_s", "max_wait_s",
+           "max_stop_s", "p95_trip_s", "max_trip_s", "total_reward"]
 DEFAULT_OUT = REPO_ROOT / "results" / "evaluation"
 
 
@@ -68,6 +69,8 @@ def load_policy(checkpoint_dir, explore=False):
         actions, _, _ = policy.compute_actions(np.stack(obs_batch), explore=explore)
         return actions
 
+    # The environment settings the policy was trained with (network, neighbour observations).
+    act.env_config = dict(policy.config.get("env_config", {}))
     return act
 
 
@@ -126,6 +129,23 @@ def write_outputs(rows, summary, out_dir, scenarios, controllers):
                 f"| {100 * s['completion_rate_mean']:.1f}% "
                 f"| {s['episodes']} |"
             )
+    lines += [
+        "",
+        "Worst-case waits (per vehicle, mean ± std over seeds of each episode's value):",
+        "",
+        "| Scenario | Controller | 95th pct. time stopped (s) | Max time stopped (s) | Longest single stop (s) "
+        "| 95th pct. trip (s) | Longest trip (s) |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for scenario in scenarios:
+        for controller in controllers:
+            s = lookup[(scenario, controller)]
+            lines.append(
+                f"| {scenario} | {controller} "
+                + "".join(f"| {s[m + '_mean']:.0f} ± {s[m + '_std']:.0f} "
+                          for m in ("p95_wait_s", "max_wait_s", "max_stop_s", "p95_trip_s", "max_trip_s"))
+                + "|"
+            )
     table = "\n".join(lines) + "\n"
     (out_dir / "summary.md").write_text(table)
 
@@ -167,7 +187,10 @@ def main():
     parser.add_argument("--policy", nargs="+", default=[], metavar="NAME=CHECKPOINT",
                         help="also evaluate trained policies, e.g. ppo=models/ppo_timed "
                              "(append :sample to sample actions instead of taking the most likely one)")
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--network", choices=list(NETWORKS), default="1x2",
+                        help="road network (1x2 corridor or 4x4 grid); see scripts/scenarios.py")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="output directory (default results/evaluation, or results/evaluation_<network>)")
     args = parser.parse_args()
 
     policies = {}
@@ -176,20 +199,32 @@ def main():
         explore = path.endswith(":sample")
         policies[name] = load_policy(path.removesuffix(":sample"), explore=explore)
     controllers = list(args.controllers) + list(policies)
+    policy_neighbors = {}
+    for name, act in policies.items():
+        trained_on = act.env_config.get("network", "1x2")
+        if trained_on != args.network:
+            print(f"warning: policy {name!r} was trained on the {trained_on} network, evaluating on {args.network}")
+        policy_neighbors[name] = bool(act.env_config.get("neighbors", False))
+    if args.out is None:
+        args.out = DEFAULT_OUT if args.network == "1x2" else REPO_ROOT / "results" / f"evaluation_{args.network}"
+    if args.network != "1x2":
+        args.scenarios = [s for s in args.scenarios if s != ORIGINAL_SCENARIO]
 
     rows = []
     for scenario in args.scenarios:
         # The original flow file is deterministic, so extra seeds would just repeat it.
         seeds = args.seeds[:1] if scenario == ORIGINAL_SCENARIO else args.seeds
         for seed in seeds:
-            flow_file = generate_flow(scenario, seed, args.horizon)
+            flow_file = generate_flow(scenario, seed, args.horizon, network=args.network)
             for name in controllers:
                 start = time.time()
                 if name in policies:
-                    env = TimedSignalEnv(horizon=args.horizon, flow_file=flow_file, seed=seed)
+                    env = TimedSignalEnv(horizon=args.horizon, flow_file=flow_file, seed=seed, network=args.network,
+                                         neighbors=policy_neighbors[name])
                     metrics = run_policy_episode(env, policies[name])
                 else:
-                    env = TrafficSignalEnv(args.horizon, flow_file=flow_file, seed=seed, save_replay=False)
+                    env = TrafficSignalEnv(args.horizon, config_file=CONFIGS_DIR / NETWORKS[args.network]["config"],
+                                           flow_file=flow_file, seed=seed, save_replay=False)
                     metrics = run_episode(env, BASELINES[name]())
                 rows.append({"scenario": scenario, "seed": seed, "controller": name, **metrics})
                 print(f"{scenario:>8} seed={seed} {name:>16}: travel time {metrics['avg_travel_time_s']:7.1f}s, "
