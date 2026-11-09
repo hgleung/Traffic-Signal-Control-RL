@@ -5,7 +5,7 @@ This project uses Reinforcement Learning (RL) to control traffic signals in the 
 
 **Headline result:** under realistic signal timing (at least 10 s of green and a 5 s clearance on every change), a PPO agent cuts average travel time by 15% compared with detector-based actuated control, which is how most real signals adapt, and by 74% compared with a fixed timer, in heavy traffic on the two-intersection network. On a 16-intersection grid with rush-hour traffic, PPO is again the fastest controller, 12% ahead of max-pressure and 18% ahead of actuated control in heavy traffic. All results are measured on traffic the agent never saw during training.
 
-**The catch:** the agents' average is better, but their worst case is not. With no limit on how long a red can last, PPO sometimes leaves a single car stopped for 6-7 minutes, while actuated control never holds one for more than about 2 minutes. See [Worst-case waits](#worst-case-waits).
+**The catch, and the fix:** with no limit on how long a red can last, PPO sometimes leaves a single car stopped for 6-7 minutes, while actuated control never holds one for more than about 2 minutes. A 90 s maximum red, enforced on top of the same trained agent, brings PPO's worst case down to actuated control's level and still beats actuated control's average travel time on both networks (10% faster in heavy traffic on both). See [Worst-case waits](#worst-case-waits) and [Capping red time](#capping-red-time).
 
 ## Features
 - **Multi-agent RL environment** for CityFlow with realistic signal timing (`scripts/signal_env.py`)
@@ -100,6 +100,7 @@ An older pipeline (`scripts/traffic_env_ppo.py`, which lets agents switch every 
 python scripts/evaluate.py                                   # all baselines, low/medium/high/original, 5 seeds, 1 h episodes
 python scripts/evaluate.py --scenarios medium --seeds 0 1 --horizon 600
 python scripts/evaluate.py --policy ppo=models/ppo_timed            # add a trained policy (":sample" suffix samples actions)
+python scripts/evaluate.py --policy ppo90=models/ppo_timed:max_red=90  # enforce a 90 s maximum red on it
 ```
 This runs each controller on randomized traffic scenarios (`scripts/scenarios.py`: Poisson arrivals with turning traffic at low, medium and high demand, plus the original flow file) and reports average travel time, average queue length, throughput and completion rate as mean ± std over seeds. Results go to `results/evaluation/` (`summary.md`, `summary.csv`, `runs.csv`, `travel_time.png`).
 
@@ -208,7 +209,35 @@ A controller can keep the average low by holding a quiet approach at red while i
 
 1. **The RL agents serve 95% of drivers best, but starve a few.** PPO has the lowest 95th-percentile stopped time on both networks. Its worst single stop, though, is 365 s on the corridor and 413 s on the grid, about 6-7 minutes at one red light. The same happens at medium demand (267 s and 324 s).
 2. **Actuated control has the best worst case.** Its maximum green ends every phase within 40 s once another approach is waiting, so no car waits much more than one full cycle: about 2 minutes at most. Fixed-time is bounded the same way. Max-pressure has no such limit and has the longest single stops of any controller.
-3. **Nothing in the agents' training rules this out.** The queue reward counts waiting cars, not how long each has waited, so leaving one car at a red costs the agent very little. Real signal controllers always enforce a maximum red. The natural next step is to add one to `TimedSignalEnv` (or a reward penalty that grows with waiting time) and measure what it costs in average travel time.
+3. **Nothing in the agents' training rules this out.** The queue reward counts waiting cars, not how long each has waited, so leaving one car at a red costs the agent very little. Real signal controllers always bound red times, which the next section adds.
+
+### Capping red time
+`TimedSignalEnv` takes an optional `max_red`. Once a lane has held a stopped vehicle at red for that long, and the current green has run its 10 s minimum, the environment overrides the agent at its next decision and switches to the green that serves the most overdue lanes. It works like a safety layer on top of any policy. We tried it two ways:
+- **Rule only:** the trained PPO agents from above, unchanged, with the limit enforced at evaluation (`--policy ppo90=models/ppo_timed:max_red=90`).
+- **Retrained:** PPO trained with a 60 s limit in place and each lane's red time in its observation (`train_ppo.py --max-red 60 --wait-obs`; `models/ppo_maxred`, `models/ppo_grid4x4_maxred`).
+
+High demand, mean ± std over seeds 0-4, in seconds:
+
+| Network | Controller | Avg travel time | 95th pct. time stopped | Longest single stop |
+|---|---|---|---|---|
+| Corridor | Actuated | 96.0 ± 3.9 | 116 ± 17 | 111 ± 4 |
+| Corridor | PPO, no limit | **81.3 ± 1.5** | 100 ± 11 | 365 ± 61 |
+| Corridor | PPO + 60 s max red | 107.0 ± 9.8 | 152 ± 32 | 149 ± 52 |
+| Corridor | **PPO + 90 s max red** | 86.3 ± 1.6 | **95 ± 3** | 116 ± 6 |
+| Corridor | PPO + 120 s max red | 82.8 ± 1.1 | 95 ± 6 | 141 ± 4 |
+| Corridor | PPO retrained with 60 s max red | 111.9 ± 12.5 | 186 ± 61 | 243 ± 122 |
+| 4x4 grid | Actuated | 231.7 ± 7.7 | 272 ± 12 | 117 ± 4 |
+| 4x4 grid | Max-pressure | 216.1 ± 9.5 | 340 ± 40 | 632 ± 76 |
+| 4x4 grid | PPO, no limit | **190.3 ± 4.3** | **222 ± 16** | 413 ± 39 |
+| 4x4 grid | PPO + 60 s max red | 237.3 ± 7.5 | 302 ± 26 | 127 ± 37 |
+| 4x4 grid | **PPO + 90 s max red** | 208.4 ± 6.0 | 241 ± 15 | 120 ± 3 |
+| 4x4 grid | PPO + 120 s max red | 199.9 ± 7.2 | 229 ± 20 | 152 ± 14 |
+| 4x4 grid | PPO retrained with 60 s max red | 235.3 ± 8.5 | 295 ± 23 | 148 ± 57 |
+
+1. **A 90 s maximum red gives the best of both.** PPO's longest single stop drops from 365 s to 116 s on the corridor and from 413 s to 120 s on the grid, about the same as actuated control (111 s and 117 s). It stays 10% faster than actuated control on average on both networks (86 s vs 96 s, and 208 s vs 232 s), with a lower 95th-percentile stopped time. On the grid it also beats max-pressure (208 s vs 216 s). One gap remains on the grid: the most total time any car spends stopped over its whole trip, across several signals, is still a little higher than under actuated control (692 s vs 616 s).
+2. **The limit has a clear trade-off curve.** Raising it to 120 s gets back most of the average (83 s and 200 s) but lets the worst stop grow to about 140-150 s. In light and medium traffic the limit costs at most a few seconds at any setting; the full sweep is in [`results/evaluation_maxred/summary.md`](results/evaluation_maxred/summary.md) and [`results/evaluation_4x4_maxred/summary.md`](results/evaluation_4x4_maxred/summary.md).
+3. **Too tight a limit backfires in heavy traffic.** At 60 s PPO becomes slower than actuated control and even the worst stop gets longer than at 90 s. In heavy traffic several approaches hit the limit at once, so the signal is likely forced through short 10 s greens, each followed by a 5 s clearance, and loses capacity. Actuated control avoids this by giving each forced phase up to 40 s of green.
+4. **Retraining with the limit didn't help.** The agent trained with a 60 s limit, and shown each lane's red time, did no better than the original agent with the same limit added afterwards. A fixed safety rule on top of the trained policy is simpler and works as well. We didn't retrain at 90 s.
 
 Both `summary.md` files also list the 95th-percentile and longest trip times for every controller and demand level. On the original traffic file the trip-time columns only cover the few vehicles that finished, so they aren't comparable across controllers.
 

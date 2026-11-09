@@ -102,3 +102,27 @@ def test_actuated_respects_min_and_max_green():
     greens = [n for p, n in runs[1:] if p != CLEARANCE_PHASE]
     assert greens, "actuated controller never changed phase under high demand"
     assert all(10 <= n <= 41 for n in greens)
+
+
+def test_max_red_overrides_an_agent_that_never_switches():
+    # An agent that always asks for phase 1 would hold every other approach at red.
+    plain, limited = make_env(), make_env(max_red=60, wait_obs=True)
+    assert limited.obs_size == plain.obs_size + limited.n_lanes
+    for env in (plain, limited):
+        obs, _ = env.reset()
+        done = False
+        while not done:
+            obs, _, _, truncated, _ = env.step({a: 0 for a in env.agents})
+            assert all(env.observation_space[a].contains(o) for a, o in obs.items())
+            done = truncated["__all__"]
+    assert plain.forced_switches == 0
+    assert limited.forced_switches > 0
+    # A car's stop can start before its lane's red does (a queue that didn't clear during
+    # the green), and the switch waits for the next decision and the clearance, so the
+    # bound on a single stop is looser than max_red itself.
+    assert limited.episode_metrics()["max_stop_s"] < 120 < plain.episode_metrics()["max_stop_s"]
+
+
+def test_wait_obs_requires_max_red():
+    with pytest.raises(ValueError):
+        make_env(wait_obs=True)

@@ -90,11 +90,16 @@ def main():
                         help="unit of --batch-size; on the 4x4 grid one env step is 16 agent steps")
     parser.add_argument("--neighbors", action="store_true",
                         help="add the adjacent intersections' queues to each agent's observation")
+    parser.add_argument("--max-red", type=int, default=None,
+                        help="longest a lane may hold a stopped vehicle at red (s); enforced by overriding the agent")
+    parser.add_argument("--wait-obs", action="store_true",
+                        help="add each lane's red time so far (as a fraction of --max-red) to the observation")
     parser.add_argument("--out", type=Path, default=REPO_ROOT / "models" / "ppo_timed")
     args = parser.parse_args()
 
     init_ray()
-    env_config = {"reward": args.reward, "network": args.network, "neighbors": args.neighbors}
+    env_config = {"reward": args.reward, "network": args.network, "neighbors": args.neighbors,
+                  "max_red": args.max_red, "wait_obs": args.wait_obs}
     algo = build_config(env_config, num_env_runners=args.num_env_runners, lr=args.lr,
                         entropy_coeff=args.entropy_coeff, gamma=args.gamma, seed=args.seed,
                         train_batch_size=args.batch_size, count_steps_by=args.count_steps_by).build()

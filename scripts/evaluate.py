@@ -186,7 +186,8 @@ def main():
     parser.add_argument("--horizon", type=int, default=3600, help="episode length in simulated seconds")
     parser.add_argument("--policy", nargs="+", default=[], metavar="NAME=CHECKPOINT",
                         help="also evaluate trained policies, e.g. ppo=models/ppo_timed "
-                             "(append :sample to sample actions instead of taking the most likely one)")
+                             "(append :sample to sample actions instead of taking the most likely one, "
+                             "or :max_red=60 to enforce a max-red limit the policy wasn't trained with)")
     parser.add_argument("--network", choices=list(NETWORKS), default="1x2",
                         help="road network (1x2 corridor or 4x4 grid); see scripts/scenarios.py")
     parser.add_argument("--out", type=Path, default=None,
@@ -194,17 +195,22 @@ def main():
     args = parser.parse_args()
 
     policies = {}
+    policy_env = {}
     for spec in args.policy:
         name, _, path = spec.partition("=")
-        explore = path.endswith(":sample")
-        policies[name] = load_policy(path.removesuffix(":sample"), explore=explore)
-    controllers = list(args.controllers) + list(policies)
-    policy_neighbors = {}
-    for name, act in policies.items():
+        path, *options = path.split(":")
+        policies[name] = act = load_policy(path, explore="sample" in options)
         trained_on = act.env_config.get("network", "1x2")
         if trained_on != args.network:
             print(f"warning: policy {name!r} was trained on the {trained_on} network, evaluating on {args.network}")
-        policy_neighbors[name] = bool(act.env_config.get("neighbors", False))
+        # Run each policy under the rules it was trained with, unless overridden.
+        policy_env[name] = {"neighbors": bool(act.env_config.get("neighbors", False)),
+                            "max_red": act.env_config.get("max_red"),
+                            "wait_obs": bool(act.env_config.get("wait_obs", False))}
+        for option in options:
+            if option.startswith("max_red="):
+                policy_env[name]["max_red"] = int(option.split("=", 1)[1])
+    controllers = list(args.controllers) + list(policies)
     if args.out is None:
         args.out = DEFAULT_OUT if args.network == "1x2" else REPO_ROOT / "results" / f"evaluation_{args.network}"
     if args.network != "1x2":
@@ -220,7 +226,7 @@ def main():
                 start = time.time()
                 if name in policies:
                     env = TimedSignalEnv(horizon=args.horizon, flow_file=flow_file, seed=seed, network=args.network,
-                                         neighbors=policy_neighbors[name])
+                                         **policy_env[name])
                     metrics = run_policy_episode(env, policies[name])
                 else:
                     env = TrafficSignalEnv(args.horizon, config_file=CONFIGS_DIR / NETWORKS[args.network]["config"],
