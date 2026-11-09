@@ -94,6 +94,14 @@ class TrafficSignalEnv(MultiAgentEnv):
     def _start_episode_stats(self):
         self._queue_samples = []
         self._seen_vehicles = set()
+        # Per-vehicle worst-case tracking: total seconds stopped, the longest
+        # single stop, and entry/exit times for each vehicle's own travel time.
+        self._stopped_total = {}
+        self._stop_run = {}
+        self._longest_stop = {}
+        self._entered_at = {}
+        self._left_at = {}
+        self._in_network = set()
 
     def _record_second(self, lane_waiting_counts=None):
         """Track traffic outcomes after every simulated second (see episode_metrics)."""
@@ -103,7 +111,25 @@ class TrafficSignalEnv(MultiAgentEnv):
             sum(lane_waiting_counts.get(lane, 0) for road in self.incoming_roads[i] for lane in self.roads[road])
             for i in range(self.num_intersections)
         ]))
-        self._seen_vehicles.update(self.engine.get_vehicles(include_waiting=False))
+        now = self.engine.get_current_time()
+        speeds = self.engine.get_vehicle_speed()  # vehicles currently on the road network
+        current = set(speeds)
+        for vehicle in current - self._in_network:
+            self._entered_at.setdefault(vehicle, now - 1)
+        for vehicle in self._in_network - current:
+            self._left_at[vehicle] = now - 1
+        self._in_network = current
+        self._seen_vehicles.update(current)
+        for vehicle, speed in speeds.items():
+            # CityFlow counts a vehicle as waiting below 0.1 m/s.
+            if speed < 0.1:
+                self._stopped_total[vehicle] = self._stopped_total.get(vehicle, 0) + 1
+                run = self._stop_run.get(vehicle, 0) + 1
+                self._stop_run[vehicle] = run
+                if run > self._longest_stop.get(vehicle, 0):
+                    self._longest_stop[vehicle] = run
+            else:
+                self._stop_run[vehicle] = 0
 
     def episode_metrics(self):
         """Traffic outcomes for the episode so far.
@@ -113,6 +139,14 @@ class TrafficSignalEnv(MultiAgentEnv):
         avg_queue:         mean waiting vehicles per signalised intersection, sampled every second
         throughput:        vehicles that completed their trip
         completion_rate:   throughput / vehicles that entered the network
+        p95_wait_s / max_wait_s:
+                           95th percentile / maximum over vehicles of the total time a
+                           vehicle spent stopped (< 0.1 m/s), including vehicles still
+                           in the network
+        max_stop_s:        the longest single uninterrupted stop of any vehicle, i.e.
+                           the longest any one car sat at a light without moving
+        p95_trip_s / max_trip_s:
+                           95th percentile / maximum travel time of completed trips
         """
         in_network = set(self.engine.get_vehicles(include_waiting=False))
         throughput = len(self._seen_vehicles - in_network)
@@ -121,6 +155,19 @@ class TrafficSignalEnv(MultiAgentEnv):
             "avg_queue": float(np.mean(self._queue_samples)) if self._queue_samples else 0.0,
             "throughput": throughput,
             "completion_rate": throughput / len(self._seen_vehicles) if self._seen_vehicles else float("nan"),
+            **self._worst_case_metrics(),
+        }
+
+    def _worst_case_metrics(self):
+        waits = np.array([self._stopped_total.get(v, 0) for v in self._seen_vehicles], dtype=float)
+        trips = np.array([self._left_at[v] - self._entered_at[v] for v in self._left_at if v in self._entered_at],
+                         dtype=float)
+        return {
+            "p95_wait_s": float(np.percentile(waits, 95)) if waits.size else 0.0,
+            "max_wait_s": float(waits.max()) if waits.size else 0.0,
+            "max_stop_s": float(max(self._longest_stop.values(), default=0)),
+            "p95_trip_s": float(np.percentile(trips, 95)) if trips.size else 0.0,
+            "max_trip_s": float(trips.max()) if trips.size else 0.0,
         }
 
     def reset(self, *, seed=None, options=None):

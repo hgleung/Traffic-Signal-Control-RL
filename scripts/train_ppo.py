@@ -46,7 +46,8 @@ def policy_mapping_fn(agent_id, *args, **kwargs):
 
 
 def build_config(env_config, num_env_runners=3, lr=3e-4, entropy_coeff=0.01, gamma=0.95, vf_clip_param=1e4,
-                 train_batch_size=4000, minibatch_size=256, num_epochs=10, hidden=(128, 128), seed=0):
+                 train_batch_size=4000, minibatch_size=256, num_epochs=10, hidden=(128, 128), seed=0,
+                 count_steps_by="env_steps"):
     register_env(ENV_NAME, env_creator)
     return (
         PPOConfig()
@@ -62,7 +63,7 @@ def build_config(env_config, num_env_runners=3, lr=3e-4, entropy_coeff=0.01, gam
             vf_clip_param=vf_clip_param,
             model={"fcnet_hiddens": list(hidden), "fcnet_activation": "tanh"},
         )
-        .multi_agent(policies={POLICY_ID}, policy_mapping_fn=policy_mapping_fn)
+        .multi_agent(policies={POLICY_ID}, policy_mapping_fn=policy_mapping_fn, count_steps_by=count_steps_by)
         .debugging(seed=seed)
     )
 
@@ -83,13 +84,20 @@ def main():
     parser.add_argument("--gamma", type=float, default=0.95,
                         help="discount per 5 s decision; 0.95 looks roughly 100 s ahead")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--network", choices=["1x2", "4x4"], default="1x2")
+    parser.add_argument("--batch-size", type=int, default=4000)
+    parser.add_argument("--count-steps-by", choices=["env_steps", "agent_steps"], default="env_steps",
+                        help="unit of --batch-size; on the 4x4 grid one env step is 16 agent steps")
+    parser.add_argument("--neighbors", action="store_true",
+                        help="add the adjacent intersections' queues to each agent's observation")
     parser.add_argument("--out", type=Path, default=REPO_ROOT / "models" / "ppo_timed")
     args = parser.parse_args()
 
     init_ray()
-    env_config = {"reward": args.reward}
+    env_config = {"reward": args.reward, "network": args.network, "neighbors": args.neighbors}
     algo = build_config(env_config, num_env_runners=args.num_env_runners, lr=args.lr,
-                        entropy_coeff=args.entropy_coeff, gamma=args.gamma, seed=args.seed).build()
+                        entropy_coeff=args.entropy_coeff, gamma=args.gamma, seed=args.seed,
+                        train_batch_size=args.batch_size, count_steps_by=args.count_steps_by).build()
 
     args.out.mkdir(parents=True, exist_ok=True)
     start = time.time()
