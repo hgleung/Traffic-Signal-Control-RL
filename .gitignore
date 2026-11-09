@@ -16,3 +16,5 @@ __pycache__/
 # System files
 .DS_Store
 Thumbs.db
+# Generated traffic scenarios and evaluation scratch output
+configs/generated/

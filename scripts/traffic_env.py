@@ -30,7 +30,7 @@ def _resolve_path(path):
 
 
 class TrafficSignalEnv(MultiAgentEnv):
-    def __init__(self, max_steps, config_file=DEFAULT_CONFIG_FILE, road_network_file=None, save_replay=None):
+    def __init__(self, max_steps, config_file=DEFAULT_CONFIG_FILE, road_network_file=None, save_replay=None, flow_file=None, seed=None):
         super().__init__()
         self.max_steps = max_steps
         self.config_file = _resolve_path(config_file)
@@ -41,6 +41,12 @@ class TrafficSignalEnv(MultiAgentEnv):
         with open(self.config_file, "r") as f:
             config = json.load(f)
         config["dir"] = str(CONFIGS_DIR) + os.sep
+        # Optional overrides, used by the evaluation harness to run generated
+        # traffic scenarios (paths are relative to configs/) with a given seed.
+        if flow_file is not None:
+            config["flowFile"] = str(flow_file)
+        if seed is not None:
+            config["seed"] = int(seed)
         if save_replay is not None:
             config["saveReplay"] = bool(save_replay)
         if config.get("saveReplay"):
