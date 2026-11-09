@@ -15,6 +15,7 @@ The project provides a comparison between a rule-based fixed signal control base
 ## Project Structure
 ```
 ├── configs/           # Simulation and network configuration files
+├── docs/              # Class report and slides, plus REPORT.md (this follow-up)
 ├── data/              # Collected rewards and results (e.g., fixed_rewards.csv)
 ├── frontend/          # Visualization and replay tools
 ├── logs/              # Training and evaluation logs
@@ -26,6 +27,8 @@ The project provides a comparison between a rule-based fixed signal control base
 │   ├── controllers.py # Baselines: fixed-time, actuated, max-pressure, legacy
 │   ├── signal_env.py  # RL environment with min green / clearance rules
 │   ├── train_ppo.py   # Train PPO (shared policy) on randomized traffic
+│   ├── train_dqn.py   # Train DQN with the same setup
+│   ├── plot_training.py # Training curves
 │   ├── scenarios.py   # Randomized low/medium/high demand scenarios
 │   ├── ppo.py         # PPO RL agent implementation
 │   ├── traffic_env.py # Environment wrapper for CityFlow
@@ -72,10 +75,12 @@ env = TrafficSignalEnv(max_steps=1000)
 fixed_rewards = fixed_signal_control(env)
 ```
 
-#### 2. RL Agent: PPO with realistic signal timing
+#### 2. RL Agents: PPO and DQN with realistic signal timing
 ```bash
 python scripts/train_ppo.py --iterations 250            # ~25 min on 4 CPU cores; writes models/ppo_timed
-python scripts/evaluate.py --policy ppo=models/ppo_timed
+python scripts/train_dqn.py --timesteps 600000          # ~45 min; writes models/dqn_timed
+python scripts/evaluate.py --policy ppo=models/ppo_timed dqn=models/dqn_timed
+python scripts/plot_training.py                         # results/training_curves.png
 ```
 Agents train in `TimedSignalEnv` (`scripts/signal_env.py`), which holds them to the same rules as the baselines:
 - a decision every 5 s, choosing which green phase to show,
@@ -84,7 +89,7 @@ Agents train in `TimedSignalEnv` (`scripts/signal_env.py`), which holds them to 
 
 Observations per intersection: vehicle and waiting counts on each incoming lane, the current phase, and "can switch" / "in clearance" flags. The default reward is minus the number of waiting vehicles on the intersection's incoming lanes (`--reward pressure` and `--reward legacy` are also available). Both intersections share one policy (independent PPO with parameter sharing; there is no centralized critic). Every training episode draws a new random scenario (low, medium or high demand, seeds 1000-1049), so the evaluation seeds (0-4) are never seen during training.
 
-The trained checkpoint is committed in `models/ppo_timed` (with its `training_log.csv`).
+Trained checkpoints are committed with their `training_log.csv`: `models/ppo_timed` (PPO, queue reward), `models/ppo_pressure` (PPO, pressure reward) and `models/dqn_timed` (DQN with double Q-learning, a dueling network, 3-step returns and prioritized replay).
 
 The original class pipeline (`scripts/traffic_env_ppo.py`, which lets agents switch every second) and its old checkpoint `models/ppo_trained_model` are kept for reference only. That checkpoint was trained with agents on the six virtual intersections and no longer loads. `scripts/ppo.py` is a single-agent CleanRL PPO reference implementation and is not wired to this environment.
 
@@ -122,8 +127,10 @@ This generates `rewards.png` comparing mean rewards over training iterations.
 - Example config: `configs/training/training_config.json`
 
 ## Results
-### Evaluation (`python scripts/evaluate.py --policy ppo=models/ppo_timed`)
-Averages over 5 evaluation seeds of 1-hour episodes on the 2-intersection network. The PPO agent never saw these seeds in training. The original flow file is deterministic, so it runs once.
+### Evaluation
+**The full write-up is in [docs/REPORT.md](docs/REPORT.md).** It covers what was wrong with the original setup, the methods, the findings and the limitations.
+
+Results of `python scripts/evaluate.py --policy ppo=models/ppo_timed ppo_pressure=models/ppo_pressure dqn=models/dqn_timed`: averages over 5 evaluation seeds of 1-hour episodes on the 2-intersection network. No agent saw these seeds in training. The original flow file is deterministic, so it runs once.
 
 | Scenario | Controller | Avg travel time (s) | Avg queue (veh) | Throughput (veh) | Completed | Episodes |
 |---|---|---|---|---|---|---|
@@ -132,30 +139,37 @@ Averages over 5 evaluation seeds of 1-hour episodes on the 2-intersection networ
 | low | max_pressure | 61.5 ± 0.3 | 1.64 ± 0.03 | 1065 ± 19 | 98.4% | 5 |
 | low | actuated | 64.5 ± 0.9 | 1.90 ± 0.10 | 1064 ± 19 | 98.3% | 5 |
 | low | ppo | 60.2 ± 0.6 | 1.43 ± 0.05 | 1066 ± 19 | 98.5% | 5 |
+| low | ppo_pressure | 60.4 ± 0.5 | 1.49 ± 0.07 | 1064 ± 18 | 98.4% | 5 |
+| low | dqn | 60.6 ± 0.7 | 1.46 ± 0.05 | 1065 ± 18 | 98.4% | 5 |
 | medium | legacy_1s_cycle | 52.0 ± 0.4 | 0.07 ± 0.01 | 2160 ± 27 | 98.6% | 5 |
 | medium | fixed_time | 119.6 ± 9.0 | 20.31 ± 2.49 | 2120 ± 18 | 96.8% | 5 |
 | medium | max_pressure | 70.2 ± 0.9 | 5.51 ± 0.24 | 2146 ± 22 | 97.9% | 5 |
 | medium | actuated | 77.7 ± 0.9 | 7.78 ± 0.26 | 2144 ± 25 | 97.9% | 5 |
 | medium | ppo | 67.5 ± 0.5 | 4.78 ± 0.10 | 2151 ± 26 | 98.2% | 5 |
+| medium | ppo_pressure | 67.7 ± 0.8 | 4.90 ± 0.19 | 2148 ± 25 | 98.1% | 5 |
+| medium | dqn | 68.1 ± 0.4 | 4.85 ± 0.12 | 2148 ± 25 | 98.1% | 5 |
 | high | legacy_1s_cycle | 59.1 ± 0.8 | 0.58 ± 0.08 | 3231 ± 45 | 98.3% | 5 |
 | high | fixed_time | 314.5 ± 15.3 | 70.83 ± 3.06 | 2784 ± 39 | 92.6% | 5 |
 | high | max_pressure | 112.5 ± 6.1 | 25.64 ± 2.72 | 3160 ± 44 | 96.1% | 5 |
 | high | actuated | 96.0 ± 3.9 | 19.79 ± 1.81 | 3191 ± 43 | 97.1% | 5 |
 | high | ppo | 81.3 ± 1.5 | 12.93 ± 0.65 | 3204 ± 44 | 97.5% | 5 |
+| high | ppo_pressure | 81.5 ± 1.1 | 13.14 ± 0.46 | 3204 ± 44 | 97.5% | 5 |
+| high | dqn | 86.3 ± 2.6 | 14.97 ± 1.18 | 3194 ± 43 | 97.2% | 5 |
 | original | legacy_1s_cycle | 1344.6 ± 0.0 | 59.97 ± 0.00 | 2754 ± 0 | 91.9% | 1 |
 | original | fixed_time | 1426.3 ± 0.0 | 83.32 ± 0.00 | 2300 ± 0 | 92.4% | 1 |
 | original | max_pressure | 1072.3 ± 0.0 | 48.48 ± 0.00 | 4444 ± 0 | 96.1% | 1 |
 | original | actuated | 1026.7 ± 0.0 | 51.27 ± 0.00 | 4722 ± 0 | 96.4% | 1 |
 | original | ppo | 938.3 ± 0.0 | 43.54 ± 0.00 | 5235 ± 0 | 97.1% | 1 |
+| original | ppo_pressure | 1263.5 ± 0.0 | 72.67 ± 0.00 | 3127 ± 0 | 93.9% | 1 |
+| original | dqn | 1018.0 ± 0.0 | 35.34 ± 0.00 | 4748 ± 0 | 97.5% | 1 |
 
 ![Average travel time](results/evaluation/travel_time.png)
 
 Takeaways:
-- **PPO beats every realistic controller at every demand level.** Its average travel time is 60 s vs 64 s for actuated control at low demand, 68 s vs 78 s at medium, and 81 s vs 96 s at high (15% faster than actuated and 28% faster than max-pressure at high demand). It also beats them on the original flow file. The margin over max-pressure at low demand is small (60.2 s vs 61.5 s).
-- **Actuated control, the realistic baseline, is far better than a fixed timer** and roughly level with max-pressure. It's better than max-pressure at high demand, where max-pressure's 10 s re-decisions switch too often.
-- **The original "change phase every second" baseline looks best, but only because CityFlow doesn't penalize it.** CityFlow has no yellow time or start-up loss, so flicking through phases every second lets vehicles through almost without stopping. At medium demand, cycling the four main phases once per second gives about 50 s average travel time, but cycling them once every 3 s gives over 400 s. Real signals can't switch like that, which is why the RL agents are now held to the same timing rules as the realistic baselines.
-- The original flow file (one car every 2 s on every straight route, with no turns) is far beyond the network's capacity for every controller, so it is only shown in the table.
-- A first PPO run with RLlib's default `vf_clip_param=10` did worse than a fixed timer, because the returns are much larger than 10 and the value function couldn't learn. Raising the clip and using `gamma=0.95` per 5 s decision fixed it.
+- **RL beats every realistic controller at every demand level.** At high demand, PPO's average travel time is 81 s, against 96 s for actuated control and 113 s for max-pressure. At low demand all the adaptive controllers are within a few seconds of each other. A second PPO training seed reproduced the results to within 0.2 s.
+- **Actuated (detector-based) control is the realistic baseline to beat.** It cuts travel time by 31-69% compared with the fixed timer.
+- **PPO and DQN end up close.** PPO is ahead at high demand and learns faster. The queue and pressure rewards perform the same on the training distribution, but only the queue reward holds up on the original flow file, which is out of distribution.
+- **The "change phase every second" legacy baseline exploits a simulator gap.** CityFlow has no yellow time or start-up loss. Real signals can't do this, so every other controller, the RL agents included, follows a 10 s minimum green and a 5 s clearance.
 
 ### Class project results (reward-based, superseded)
 These compare the environment's own reward rather than traffic outcomes. They were produced with agents on the 6 light-less intersections and a phase-every-second baseline, so they aren't comparable with the table above.
