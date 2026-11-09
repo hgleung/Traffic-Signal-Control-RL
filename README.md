@@ -1,16 +1,17 @@
 # Traffic Signal Control with Reinforcement Learning
 
 ## Overview
-This project explores the application of Reinforcement Learning (RL) to optimize traffic signal control in urban road networks. By leveraging the CityFlow traffic simulator, the system aims to reduce congestion and improve traffic flow by dynamically adjusting traffic lights based on real-time traffic conditions.
+This project uses Reinforcement Learning (RL) to control traffic signals in the CityFlow traffic simulator. It started as a CS 175 class project ([report](docs/Final%20Project%20Report.pdf)) and was later revisited to fix the simulation, the baselines and, above all, the way results are measured. The full write-up of the follow-up is in [docs/REPORT.md](docs/REPORT.md).
 
-The project provides a comparison between a rule-based fixed signal control baseline and a Proximal Policy Optimization (PPO) RL agent.
+**Headline result:** under realistic signal timing (at least 10 s of green and a 5 s clearance on every change), a PPO agent cuts average travel time by 15% compared with detector-based actuated control, which is how most real signals adapt, and by 74% compared with a fixed timer, in heavy traffic on the two-intersection network. All results are measured on traffic the agent never saw during training.
 
 ## Features
-- **Multi-agent RL environment** for traffic signal control using CityFlow
-- **PPO (Proximal Policy Optimization)** implementation for learning optimal traffic light policies
-- **Baseline fixed-signal control** for benchmarking
-- **Configurable simulation scenarios** via JSON files
-- **Training, evaluation, and visualization tools**
+- **Multi-agent RL environment** for CityFlow with realistic signal timing (`scripts/signal_env.py`)
+- **PPO and DQN agents** (RLlib) sharing one policy across intersections
+- **Realistic baselines**: fixed-time, detector-based actuated control and max-pressure
+- **Randomized, seeded traffic scenarios**, with separate seeds for training and evaluation
+- **Evaluation on traffic outcomes**: travel time, queue length, throughput and completion rate
+- Dockerfile, pinned dependencies and tests
 
 ## Project Structure
 ```
@@ -127,68 +128,65 @@ This generates `rewards.png` comparing mean rewards over training iterations.
 - Example config: `configs/training/training_config.json`
 
 ## Results
-### Evaluation
-**The full write-up is in [docs/REPORT.md](docs/REPORT.md).** It covers what was wrong with the original setup, the methods, the findings and the limitations.
 
-Results of `python scripts/evaluate.py --policy ppo=models/ppo_timed ppo_pressure=models/ppo_pressure dqn=models/dqn_timed`: averages over 5 evaluation seeds of 1-hour episodes on the 2-intersection network. No agent saw these seeds in training. The original flow file is deterministic, so it runs once.
+### How results are measured
+Every controller is judged on what drivers experience, not on the RL reward:
+- **Average travel time**: the main metric. It covers every vehicle that entered the network, and vehicles still driving at the end count up to the end of the episode.
+- **Average queue**: waiting vehicles per intersection, sampled every second.
+- **Throughput and completion rate**: trips finished, and finished trips as a share of vehicles that entered.
 
-| Scenario | Controller | Avg travel time (s) | Avg queue (veh) | Throughput (veh) | Completed | Episodes |
-|---|---|---|---|---|---|---|
-| low | legacy_1s_cycle | 49.3 ± 0.3 | 0.03 ± 0.00 | 1067 ± 19 | 98.7% | 5 |
-| low | fixed_time | 93.7 ± 2.4 | 6.44 ± 0.29 | 1062 ± 20 | 98.2% | 5 |
-| low | max_pressure | 61.5 ± 0.3 | 1.64 ± 0.03 | 1065 ± 19 | 98.4% | 5 |
-| low | actuated | 64.5 ± 0.9 | 1.90 ± 0.10 | 1064 ± 19 | 98.3% | 5 |
-| low | ppo | 60.2 ± 0.6 | 1.43 ± 0.05 | 1066 ± 19 | 98.5% | 5 |
-| low | ppo_pressure | 60.4 ± 0.5 | 1.49 ± 0.07 | 1064 ± 18 | 98.4% | 5 |
-| low | dqn | 60.6 ± 0.7 | 1.46 ± 0.05 | 1065 ± 18 | 98.4% | 5 |
-| medium | legacy_1s_cycle | 52.0 ± 0.4 | 0.07 ± 0.01 | 2160 ± 27 | 98.6% | 5 |
-| medium | fixed_time | 119.6 ± 9.0 | 20.31 ± 2.49 | 2120 ± 18 | 96.8% | 5 |
-| medium | max_pressure | 70.2 ± 0.9 | 5.51 ± 0.24 | 2146 ± 22 | 97.9% | 5 |
-| medium | actuated | 77.7 ± 0.9 | 7.78 ± 0.26 | 2144 ± 25 | 97.9% | 5 |
-| medium | ppo | 67.5 ± 0.5 | 4.78 ± 0.10 | 2151 ± 26 | 98.2% | 5 |
-| medium | ppo_pressure | 67.7 ± 0.8 | 4.90 ± 0.19 | 2148 ± 25 | 98.1% | 5 |
-| medium | dqn | 68.1 ± 0.4 | 4.85 ± 0.12 | 2148 ± 25 | 98.1% | 5 |
-| high | legacy_1s_cycle | 59.1 ± 0.8 | 0.58 ± 0.08 | 3231 ± 45 | 98.3% | 5 |
-| high | fixed_time | 314.5 ± 15.3 | 70.83 ± 3.06 | 2784 ± 39 | 92.6% | 5 |
-| high | max_pressure | 112.5 ± 6.1 | 25.64 ± 2.72 | 3160 ± 44 | 96.1% | 5 |
-| high | actuated | 96.0 ± 3.9 | 19.79 ± 1.81 | 3191 ± 43 | 97.1% | 5 |
-| high | ppo | 81.3 ± 1.5 | 12.93 ± 0.65 | 3204 ± 44 | 97.5% | 5 |
-| high | ppo_pressure | 81.5 ± 1.1 | 13.14 ± 0.46 | 3204 ± 44 | 97.5% | 5 |
-| high | dqn | 86.3 ± 2.6 | 14.97 ± 1.18 | 3194 ± 43 | 97.2% | 5 |
-| original | legacy_1s_cycle | 1344.6 ± 0.0 | 59.97 ± 0.00 | 2754 ± 0 | 91.9% | 1 |
-| original | fixed_time | 1426.3 ± 0.0 | 83.32 ± 0.00 | 2300 ± 0 | 92.4% | 1 |
-| original | max_pressure | 1072.3 ± 0.0 | 48.48 ± 0.00 | 4444 ± 0 | 96.1% | 1 |
-| original | actuated | 1026.7 ± 0.0 | 51.27 ± 0.00 | 4722 ± 0 | 96.4% | 1 |
-| original | ppo | 938.3 ± 0.0 | 43.54 ± 0.00 | 5235 ± 0 | 97.1% | 1 |
-| original | ppo_pressure | 1263.5 ± 0.0 | 72.67 ± 0.00 | 3127 ± 0 | 93.9% | 1 |
-| original | dqn | 1018.0 ± 0.0 | 35.34 ± 0.00 | 4748 ± 0 | 97.5% | 1 |
+Each number is the mean ± standard deviation over 5 one-hour episodes with different random traffic (seeds 0-4). Agents are trained on seeds 1000-1049, so these are always unseen traffic. Run `python scripts/evaluate.py --policy ppo=models/ppo_timed dqn=models/dqn_timed ppo_pressure=models/ppo_pressure` to reproduce.
+
+### Findings: two-intersection corridor
+Average travel time in seconds (lower is better):
+
+| Controller | Low demand | Medium demand | High demand |
+|---|---|---|---|
+| Fixed-time (30 s greens) | 93.7 ± 2.4 | 119.6 ± 9.0 | 314.5 ± 15.3 |
+| Actuated (detector-based, like real signals) | 64.5 ± 0.9 | 77.7 ± 0.9 | 96.0 ± 3.9 |
+| Max-pressure (research benchmark) | 61.5 ± 0.3 | 70.2 ± 0.9 | 112.5 ± 6.1 |
+| **PPO** | **60.2 ± 0.6** | **67.5 ± 0.5** | **81.3 ± 1.5** |
+| DQN | 60.6 ± 0.7 | 68.1 ± 0.4 | 86.3 ± 2.6 |
 
 ![Average travel time](results/evaluation/travel_time.png)
 
-Takeaways:
-- **RL beats every realistic controller at every demand level.** At high demand, PPO's average travel time is 81 s, against 96 s for actuated control and 113 s for max-pressure. At low demand all the adaptive controllers are within a few seconds of each other. A second PPO training seed reproduced the results to within 0.2 s.
-- **Actuated (detector-based) control is the realistic baseline to beat.** It cuts travel time by 31-69% compared with the fixed timer.
-- **PPO and DQN end up close.** PPO is ahead at high demand and learns faster. The queue and pressure rewards perform the same on the training distribution, but only the queue reward holds up on the original flow file, which is out of distribution.
-- **The "change phase every second" legacy baseline exploits a simulator gap.** CityFlow has no yellow time or start-up loss. Real signals can't do this, so every other controller, the RL agents included, follows a 10 s minimum green and a 5 s clearance.
+1. **The RL agents beat every realistic controller, and the gap grows with traffic.** In heavy traffic PPO's average trip takes 81 s, against 96 s for actuated control (15% faster) and 315 s for the fixed timer (74% faster). Queues are about a third shorter than under actuated control (12.9 vs 19.8 waiting vehicles per intersection). In light traffic every adaptive controller is within a few seconds of the others, so RL adds little there.
+2. **The real competitor is actuated control, not a fixed timer.** Simply reacting to detected cars cuts travel time by 31-69% compared with the fixed timer. Most of what a "PPO beats fixed timing" comparison shows is the value of adapting at all; the RL-specific gain is a further 7-15% over actuated control.
+3. **The result is robust.** A second PPO training run reproduced the numbers to within 0.2 s. DQN reaches nearly the same performance, and PPO is ahead only in heavy traffic (81 s vs 86 s).
+4. **The environment mattered more than the algorithm.** PPO only beat the baselines once agents were held to realistic timing rules and RLlib's value-function clipping was fixed (the default `vf_clip_param=10` stopped the first run from learning; it did worse than the fixed timer).
 
-### Class project results (reward-based, superseded)
-These compare the environment's own reward rather than traffic outcomes. They were produced with agents on the 6 light-less intersections and a phase-every-second baseline, so they aren't comparable with the table above.
+The full table, which also covers queue length, throughput, the pressure-reward agent and the original class traffic file, is in [`results/evaluation/summary.md`](results/evaluation/summary.md).
 
-#### Baseline (Fixed Signal Control)
-- **Total reward** (sample run): ~992.33
-- Reward increases steadily with simulation steps, reaching ~885 at step 893 (see `data/fixed_rewards.csv`).
+### Why "mean reward" didn't show a real win
+The class project reported that PPO beat the fixed-signal baseline because its mean episode reward rose from about 1015 to 1311, above the baseline's 992. That comparison doesn't show that traffic improved, for four reasons.
 
-#### PPO RL Agent
-- **Mean reward** improves over training:
-    - Iteration 1: 1014.80
-    - Iteration 10: 1205.67
-    - Iteration 20: 1241.89
-    - Iteration 30: 1270.44
-    - Iteration 40: 1293.09
-    - Iteration 46: 1311.09
-- PPO outperforms the fixed-signal baseline, as shown in `scripts/results/rewards.png`.
+**1. The reward ranked the worst controller as the best.** The table below scores today's controllers with the class project's reward function (summed over a one-hour episode) alongside their travel times. The fixed timer gets the *highest* reward in light and medium traffic, even though it has by far the *worst* travel time:
 
-![Reward Curve](scripts/results/rewards.png)
+| Demand | Controller | Class reward (higher = "better") | Avg travel time (lower = better) |
+|---|---|---|---|
+| Low | Fixed-time | **4883** | 93.7 s (worst) |
+| Low | Actuated | 4709 | 64.5 s |
+| Low | Max-pressure | 4694 | 61.5 s |
+| Medium | Fixed-time | **7636** | 119.6 s (worst) |
+| Medium | Max-pressure | 7161 | 70.2 s |
+| Medium | Actuated | 7137 | 77.7 s |
+
+The reason is in how the reward was built. On one medium-demand episode (seed 0), the fixed timer's reward breaks down as +7460 from a "throughput" bonus, -675 for vehicles on its approaches, -45 for waiting vehicles and +720 from a constant per-step bonus. Actuated control gets +6635, -338, -15 and +720.
+
+That "throughput" bonus was the *drop* in the number of cars in the whole network since the previous second, with increases ignored. It doesn't measure cars getting through; it rewards the car count swinging up and down. A timer that holds traffic and then releases it in bursts produces big drops, so the fixed timer earned a larger bonus than actuated control even though it completed fewer trips (2120 vs 2144 on average over the 5 seeds). The waiting-vehicle penalty was divided by such a large constant that it barely registered. The bonus was also network-wide and handed to every agent, including the six on light-less intersections, so agents were rewarded for traffic they couldn't influence.
+
+**2. It compared different things.** The baseline's 992 was the total reward of one deterministic run. PPO's 1311 was a training statistic: the average over training episodes with exploration switched on, at the 46th iteration.
+
+**3. There was no held-out test.** Training and "evaluation" both used the same single traffic file, so a high score could come from memorizing that one pattern rather than from controlling traffic well.
+
+**4. The agents could use an unrealistic trick.** Agents (and the baseline) could change phase every second. CityFlow has no yellow time or start-up delay, so flicking phases every second lets cars through almost without stopping. This trick beats every realistic controller in the simulator (49-59 s average travel time), but no real signal can do it.
+
+The rebuilt evaluation fixes each of these. Controllers are compared on travel time, queues and throughput, all measured the same way and on unseen traffic. Every controller follows the same 10 s minimum green and 5 s clearance.
+
+### Class project results (superseded)
+For reference, these are the numbers in the original report. As explained above, they compare the agents' own reward rather than traffic outcomes, so they don't show a real improvement:
+- Fixed-signal baseline: total reward ≈ 992 for one 1000-step run (`data/fixed_rewards.csv`).
+- PPO: mean training reward rose from 1015 (iteration 1) to 1311 (iteration 46) (`scripts/results/rewards.png`).
 
 ## References
 - [CityFlow: An Open-source Traffic Simulator](https://cityflow-project.github.io/)
