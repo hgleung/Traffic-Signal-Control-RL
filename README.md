@@ -1,7 +1,7 @@
 # Traffic Signal Control with Reinforcement Learning
 
 ## Overview
-This project uses Reinforcement Learning (RL) to control traffic signals in the CityFlow traffic simulator. The full write-up is in [docs/REPORT.md](docs/REPORT.md).
+This project uses Reinforcement Learning (RL) to control traffic signals in the CityFlow traffic simulator.
 
 **Headline result:** under realistic signal timing (at least 10 s of green and a 5 s clearance on every change), a PPO agent cuts average travel time by 15% compared with detector-based actuated control, which is how most real signals adapt, and by 74% compared with a fixed timer, in heavy traffic on the two-intersection network. All results are measured on traffic the agent never saw during training.
 
@@ -16,7 +16,7 @@ This project uses Reinforcement Learning (RL) to control traffic signals in the 
 ## Project Structure
 ```
 ├── configs/           # Simulation and network configuration files
-├── docs/              # Project write-up (REPORT.md) and slides
+├── docs/              # Report and presentation slides (PDF)
 ├── data/              # Collected rewards and results (e.g., fixed_rewards.csv)
 ├── frontend/          # Visualization and replay tools
 ├── logs/              # Training and evaluation logs
