@@ -6,11 +6,13 @@ For every (scenario, seed, controller) this runs one full episode and records:
   avg_queue          mean number of waiting vehicles per signalised intersection
   throughput         vehicles that completed their trip
   completion_rate    throughput / vehicles that entered the network
-  total_reward       the environment's reward summed over agents, for reference
+  total_reward       the environment's reward summed over agents, for reference only
+                     (trained policies run in TimedSignalEnv, whose reward differs)
 
 Usage (from any directory):
   python scripts/evaluate.py                       # all baselines, all scenarios, 5 seeds
   python scripts/evaluate.py --scenarios medium --seeds 0 1 --horizon 600
+  python scripts/evaluate.py --policy ppo=models/ppo_timed   # add a trained policy
 
 Writes runs.csv (one row per episode), summary.csv and summary.md (mean and std
 over seeds) and travel_time.png to results/evaluation/ by default.
@@ -24,6 +26,7 @@ import numpy as np
 
 from controllers import BASELINES
 from scenarios import DEMAND_LEVELS, ORIGINAL_SCENARIO, generate_flow
+from signal_env import TimedSignalEnv
 from traffic_env import REPO_ROOT, TrafficSignalEnv
 
 METRICS = ["avg_travel_time_s", "avg_queue", "throughput", "completion_rate", "total_reward"]
@@ -33,34 +36,52 @@ DEFAULT_OUT = REPO_ROOT / "results" / "evaluation"
 def run_episode(env, controller):
     env.reset()
     controller.reset(env)
-    incoming_lanes = [
-        [lane for road in env.incoming_roads[i] for lane in env.roads[road]]
-        for i in range(env.num_intersections)
-    ]
-    queue_samples = []
     total_reward = 0.0
-    seen = set()
     t = 0
     done = False
     while not done:
         actions = controller.act(env, t)
         _, rewards, terminateds, _, _ = env.step(actions)
         total_reward += sum(rewards.values())
-        waiting = env.engine.get_lane_waiting_vehicle_count()
-        queue_samples.append(np.mean([sum(waiting.get(l, 0) for l in lanes) for lanes in incoming_lanes]))
-        seen.update(env.engine.get_vehicles(include_waiting=False))
         done = terminateds["__all__"]
         t += 1
+    return {**env.episode_metrics(), "total_reward": total_reward}
 
-    in_network = set(env.engine.get_vehicles(include_waiting=False))
-    throughput = len(seen - in_network)
-    return {
-        "avg_travel_time_s": env.engine.get_average_travel_time(),
-        "avg_queue": float(np.mean(queue_samples)),
-        "throughput": throughput,
-        "completion_rate": throughput / len(seen) if seen else float("nan"),
-        "total_reward": total_reward,
-    }
+
+def load_policy(checkpoint_dir, explore=False):
+    """Load a trained RLlib policy (see train_ppo.py) and return obs_batch -> actions.
+
+    explore=False takes the most likely action (deterministic); explore=True samples
+    from the policy's action distribution, as during training.
+    """
+    import os
+    os.environ.setdefault("RLLIB_DISABLE_NEW_API_STACK", "True")
+    from ray.rllib.policy.policy import Policy
+    from train_ppo import POLICY_ID
+
+    policy = Policy.from_checkpoint(str(Path(checkpoint_dir).resolve() / "policies" / POLICY_ID))
+    if explore:
+        import torch
+        torch.manual_seed(0)  # reproducible sampled actions
+
+    def act(obs_batch):
+        actions, _, _ = policy.compute_actions(np.stack(obs_batch), explore=explore)
+        return actions
+
+    return act
+
+
+def run_policy_episode(env, act):
+    """Run a trained policy on TimedSignalEnv (decisions every few seconds, timing rules enforced)."""
+    obs, _ = env.reset()
+    total_reward = 0.0
+    done = False
+    while not done:
+        actions = act([obs[a] for a in env.agents])
+        obs, rewards, _, truncateds, _ = env.step(dict(zip(env.agents, actions)))
+        total_reward += sum(rewards.values())
+        done = truncateds["__all__"]
+    return {**env.episode_metrics(), "total_reward": total_reward}
 
 
 def summarize(rows):
@@ -143,8 +164,18 @@ def main():
     parser.add_argument("--controllers", nargs="+", default=list(BASELINES), choices=list(BASELINES))
     parser.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     parser.add_argument("--horizon", type=int, default=3600, help="episode length in simulated seconds")
+    parser.add_argument("--policy", nargs="+", default=[], metavar="NAME=CHECKPOINT",
+                        help="also evaluate trained policies, e.g. ppo=models/ppo_timed "
+                             "(append :sample to sample actions instead of taking the most likely one)")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()
+
+    policies = {}
+    for spec in args.policy:
+        name, _, path = spec.partition("=")
+        explore = path.endswith(":sample")
+        policies[name] = load_policy(path.removesuffix(":sample"), explore=explore)
+    controllers = list(args.controllers) + list(policies)
 
     rows = []
     for scenario in args.scenarios:
@@ -152,17 +183,21 @@ def main():
         seeds = args.seeds[:1] if scenario == ORIGINAL_SCENARIO else args.seeds
         for seed in seeds:
             flow_file = generate_flow(scenario, seed, args.horizon)
-            for name in args.controllers:
-                env = TrafficSignalEnv(args.horizon, flow_file=flow_file, seed=seed, save_replay=False)
+            for name in controllers:
                 start = time.time()
-                metrics = run_episode(env, BASELINES[name]())
+                if name in policies:
+                    env = TimedSignalEnv(horizon=args.horizon, flow_file=flow_file, seed=seed)
+                    metrics = run_policy_episode(env, policies[name])
+                else:
+                    env = TrafficSignalEnv(args.horizon, flow_file=flow_file, seed=seed, save_replay=False)
+                    metrics = run_episode(env, BASELINES[name]())
                 rows.append({"scenario": scenario, "seed": seed, "controller": name, **metrics})
                 print(f"{scenario:>8} seed={seed} {name:>16}: travel time {metrics['avg_travel_time_s']:7.1f}s, "
                       f"queue {metrics['avg_queue']:6.2f}, throughput {metrics['throughput']:5d} "
                       f"({time.time() - start:.1f}s)")
 
     summary = summarize(rows)
-    table = write_outputs(rows, summary, args.out, args.scenarios, args.controllers)
+    table = write_outputs(rows, summary, args.out, args.scenarios, controllers)
     print()
     print(table)
     print(f"Results written to {args.out}")

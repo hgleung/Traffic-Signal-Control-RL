@@ -11,6 +11,8 @@ Phase layout of CityFlow's generated intersections (see the road network file):
                 E-W left, N-S left)
   phases 5-8  : single-approach phases (straight + left from one direction)
 """
+import json
+
 import numpy as np
 
 CLEARANCE_PHASE = 0
@@ -152,8 +154,112 @@ class MaxPressure(_PhaseSwitcher):
         return max(pressures, key=pressures.get)
 
 
+class Actuated(_PhaseSwitcher):
+    """Fully actuated control, the way most real detector-equipped signals run.
+
+    Real signals don't weigh cars: they sense them with inductive loops cut into
+    the pavement near the stop line (or with video/radar zones that act like
+    loops). An actuated controller (FHWA Traffic Signal Timing Manual, ch. 5):
+
+    * serves phases in a fixed order, but skips any phase with no vehicle
+      waiting on its detectors ("no call"),
+    * gives every green a minimum time,
+    * extends the green each time a vehicle crosses the detector, ending it once
+      no vehicle has been detected for `passage_time` seconds ("gap out"),
+    * ends the green at `max_green` if traffic keeps coming but another phase
+      has a call ("max out"),
+    * rests in the current green when no other phase has a call.
+
+    Detectors here are the last `detector_length` metres of each incoming lane,
+    i.e. a stop-line loop. Defaults: 10 s minimum green and 5 s clearance (same
+    as the other controllers), 3 s passage time (~30 m detector at ~11 m/s,
+    FHWA's distance/speed rule), 40 s maximum green.
+    """
+    name = "actuated"
+
+    def __init__(self, min_green=10, max_green=40, passage_time=3, clearance=5,
+                 detector_length=30.0, phases=(1, 2, 3, 4)):
+        super().__init__(min_green=min_green, clearance=clearance)
+        self.max_green = max_green
+        self.passage_time = passage_time
+        self.detector_length = detector_length
+        self.phases = list(phases)
+
+    def reset(self, env):
+        with open(env.road_network_file) as f:
+            data = json.load(f)
+        widths = {i["id"]: i.get("width", 0) for i in data["intersections"]}
+        lane_length = {}
+        for road in data["roads"]:
+            points = road["points"]
+            length = sum(np.hypot(b["x"] - a["x"], b["y"] - a["y"]) for a, b in zip(points, points[1:]))
+            # CityFlow trims each road by the width of the intersections at its ends.
+            length -= widths[road["startIntersection"]] + widths[road["endIntersection"]]
+            for k in range(len(road["lanes"])):
+                lane_length[f"{road['id']}_{k}"] = length
+        self._lane_length = lane_length
+
+        self._phase_lanes = []
+        for intersection in env.intersections:
+            links = intersection["roadLinks"]
+            lightphases = intersection["trafficLight"]["lightphases"]
+            lanes = {}
+            for p in self.phases:
+                lanes[p] = sorted({
+                    f"{links[k]['startRoad']}_{ll['startLaneIndex']}"
+                    for k in lightphases[p]["availableRoadLinks"]
+                    if links[k]["type"] != "turn_right"
+                    for ll in links[k]["laneLinks"]
+                })
+            self._phase_lanes.append(lanes)
+        n = len(env.agents)
+        self._last_detection = [-np.inf] * n
+        self._detected_t = None
+        self._detected = None
+        super().reset(env)
+
+    def initial_phase(self, env, idx):
+        return self.phases[0]
+
+    def _detections(self, env, t):
+        """Lanes whose stop-line detector is occupied at time t (computed once per second)."""
+        if self._detected_t != t:
+            lane_vehicles = env.engine.get_lane_vehicles()
+            distance = env.engine.get_vehicle_distance()
+            occupied = set()
+            for lane, vehicles in lane_vehicles.items():
+                limit = self._lane_length.get(lane)
+                if limit is None:
+                    continue
+                if any(distance.get(v, 0.0) >= limit - self.detector_length for v in vehicles):
+                    occupied.add(lane)
+            self._detected, self._detected_t = occupied, t
+        return self._detected
+
+    def act(self, env, t):
+        occupied = self._detections(env, t)
+        for idx in range(len(env.agents)):
+            if self.clearance_until[idx] is None and any(l in occupied for l in self._phase_lanes[idx][self.phase[idx]]):
+                self._last_detection[idx] = t
+        return super().act(env, t)
+
+    def choose(self, env, idx, t):
+        occupied = self._detections(env, t)
+        current = self.phase[idx]
+        order = self.phases[self.phases.index(current) + 1:] + self.phases[:self.phases.index(current)]
+        calls = [p for p in order if any(l in occupied for l in self._phase_lanes[idx][p])]
+        if not calls:
+            return current  # rest in green
+        green_time = t - self.green_start[idx]
+        gapped_out = t - self._last_detection[idx] >= self.passage_time
+        if gapped_out or green_time >= self.max_green:
+            return calls[0]
+        return current
+
+
 BASELINES = {
     LegacyCycle.name: LegacyCycle,
     FixedTime.name: FixedTime,
     MaxPressure.name: MaxPressure,
+    Actuated.name: Actuated,
 }

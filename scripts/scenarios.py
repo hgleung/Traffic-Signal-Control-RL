@@ -83,10 +83,16 @@ def candidate_routes(roadnet_file=DEFAULT_ROADNET):
     return routes
 
 
-def generate_flow(level, seed, horizon, roadnet_file=DEFAULT_ROADNET):
-    """Write a randomized flow file and return its path relative to configs/."""
+def generate_flow(level, seed, horizon, roadnet_file=DEFAULT_ROADNET, cache=False):
+    """Write a randomized flow file and return its path relative to configs/.
+
+    With cache=True an existing file for the same (level, seed, horizon) is reused.
+    """
     if level == ORIGINAL_SCENARIO:
         return ORIGINAL_FLOW_FILE
+    path = GENERATED_DIR / f"flow_{level}_seed{seed}_h{horizon}.json"
+    if cache and path.exists():
+        return path.relative_to(CONFIGS_DIR).as_posix()
     rate = DEMAND_LEVELS[level]
     rng = np.random.default_rng(seed)
     flows = []
@@ -103,7 +109,9 @@ def generate_flow(level, seed, horizon, roadnet_file=DEFAULT_ROADNET):
     flows.sort(key=lambda f: f["startTime"])
 
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-    path = GENERATED_DIR / f"flow_{level}_seed{seed}_h{horizon}.json"
-    with open(path, "w") as f:
+    # Write to a temporary name first so parallel workers never read a half-written file.
+    tmp = path.with_suffix(f".{np.random.randint(1 << 30)}.tmp")
+    with open(tmp, "w") as f:
         json.dump(flows, f)
+    tmp.replace(path)
     return path.relative_to(CONFIGS_DIR).as_posix()

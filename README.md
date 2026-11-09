@@ -23,7 +23,9 @@ The project provides a comparison between a rule-based fixed signal control base
 ├── results/           # Evaluation outputs (scripts/evaluate.py)
 ├── scripts/           # Core RL and simulation scripts
 │   ├── evaluate.py    # Compare controllers on travel time, queues, throughput
-│   ├── controllers.py # Baselines: fixed-time, max-pressure, legacy
+│   ├── controllers.py # Baselines: fixed-time, actuated, max-pressure, legacy
+│   ├── signal_env.py  # RL environment with min green / clearance rules
+│   ├── train_ppo.py   # Train PPO (shared policy) on randomized traffic
 │   ├── scenarios.py   # Randomized low/medium/high demand scenarios
 │   ├── ppo.py         # PPO RL agent implementation
 │   ├── traffic_env.py # Environment wrapper for CityFlow
@@ -52,7 +54,7 @@ cd Traffic-Signal-Control-RL
 python3.10 -m venv venv && source venv/bin/activate
 pip install "git+https://github.com/cityflow-project/CityFlow.git@81ee0f47659ca66177a71f81676691c58ee89184"
 pip install -r requirements.txt
-pytest -q tests                        # smoke test: one short episode end to end
+pytest -q tests                        # ~3 s; run it while no training is using the CPU (CityFlow slows to a crawl when cores are oversubscribed)
 ```
 `requirements-freeze-2024.txt` is the original full `pip freeze` from the class project, kept for reference.
 
@@ -70,28 +72,43 @@ env = TrafficSignalEnv(max_steps=1000)
 fixed_rewards = fixed_signal_control(env)
 ```
 
-#### 2. RL Agent: PPO (RLlib, multi-agent)
-Training, tuning and evaluation live in `scripts/traffic_env_ppo.py` (`train_PPO()`, `tune_hyperparameters()`, `evaluate_policy()`).
-```python
-from traffic_env_ppo import train_PPO, evaluate_policy
-train_PPO()
-ppo_rewards = evaluate_policy()
+#### 2. RL Agent: PPO with realistic signal timing
+```bash
+python scripts/train_ppo.py --iterations 250            # ~25 min on 4 CPU cores; writes models/ppo_timed
+python scripts/evaluate.py --policy ppo=models/ppo_timed
 ```
-> **Note:** the checkpoint in `models/ppo_trained_model` was trained with one agent per intersection *including* the six virtual (light-less) entry points. The environment now only creates agents for the two signalised intersections, so that checkpoint no longer loads and the model needs to be retrained.
+Agents train in `TimedSignalEnv` (`scripts/signal_env.py`), which holds them to the same rules as the baselines:
+- a decision every 5 s, choosing which green phase to show,
+- at least 10 s of green before a change (earlier requests are ignored; the observation says whether switching is allowed),
+- a 5 s clearance (phase 0) on every change.
 
-`scripts/ppo.py` is a single-agent CleanRL PPO reference implementation and is not wired to this environment.
+Observations per intersection: vehicle and waiting counts on each incoming lane, the current phase, and "can switch" / "in clearance" flags. The default reward is minus the number of waiting vehicles on the intersection's incoming lanes (`--reward pressure` and `--reward legacy` are also available). Both intersections share one policy (independent PPO with parameter sharing; there is no centralized critic). Every training episode draws a new random scenario (low, medium or high demand, seeds 1000-1049), so the evaluation seeds (0-4) are never seen during training.
+
+The trained checkpoint is committed in `models/ppo_timed` (with its `training_log.csv`).
+
+The original class pipeline (`scripts/traffic_env_ppo.py`, which lets agents switch every second) and its old checkpoint `models/ppo_trained_model` are kept for reference only. That checkpoint was trained with agents on the six virtual intersections and no longer loads. `scripts/ppo.py` is a single-agent CleanRL PPO reference implementation and is not wired to this environment.
 
 #### 3. Evaluate controllers on traffic outcomes
 ```bash
 python scripts/evaluate.py                                   # all baselines, low/medium/high/original, 5 seeds, 1 h episodes
 python scripts/evaluate.py --scenarios medium --seeds 0 1 --horizon 600
+python scripts/evaluate.py --policy ppo=models/ppo_timed            # add a trained policy (":sample" suffix samples actions)
 ```
 This runs each controller on randomized traffic scenarios (`scripts/scenarios.py`: Poisson arrivals with turning traffic at low, medium and high demand, plus the original flow file) and reports average travel time, average queue length, throughput and completion rate as mean ± std over seeds. Results go to `results/evaluation/` (`summary.md`, `summary.csv`, `runs.csv`, `travel_time.png`).
 
 Baselines (`scripts/controllers.py`):
 - `fixed_time`: pre-timed 4-phase plan, 30 s green per phase with a 5 s clearance between phases
-- `max_pressure`: max-pressure control, re-decided every 10 s (minimum green) with a 5 s clearance on every change
+- `max_pressure`: max-pressure control (a research benchmark), re-decided every 10 s (minimum green) with a 5 s clearance on every change
+- `actuated`: fully actuated control, the way most detector-equipped signals in the field run (see below)
 - `legacy_1s_cycle`: the class project's original baseline, which changes phase every second (kept for reference only; see below)
+
+**How real signals adapt.** Real signals don't weigh cars (pressure plates are a myth). Most sense them with inductive loops cut into the pavement near the stop line, or with video or radar zones that act like loops ([Wikipedia: Signal timing](https://en.wikipedia.org/wiki/Signal_timing)). Under actuated control ([FHWA Traffic Signal Timing Manual, ch. 5](https://ops-dr.fhwa.dot.gov/Publications/signal_timing/04.htm)):
+- each green gets a minimum time (typically 5-10 s),
+- each detected vehicle extends the green until no vehicle has crossed the detector for a "passage time" (gap-out),
+- a maximum green ends it if another phase is waiting (max-out),
+- phases with no waiting vehicles are skipped.
+
+The `actuated` baseline models this with a stop-line detector covering the last 30 m of each lane, a 10 s minimum green, 3 s passage time, 40 s maximum green and 5 s clearance. Its results barely changed across passage times of 2-3 s and maximum greens of 40-60 s.
 
 #### 4. Visualize Results
 Use the notebook or `scripts/results/create_graph.py` to visualize reward curves:
@@ -105,30 +122,40 @@ This generates `rewards.png` comparing mean rewards over training iterations.
 - Example config: `configs/training/training_config.json`
 
 ## Results
-### Baseline evaluation (`python scripts/evaluate.py`)
-Averages over 5 seeds of 1-hour episodes on the 2-intersection network (the original flow file is deterministic, so it runs once):
+### Evaluation (`python scripts/evaluate.py --policy ppo=models/ppo_timed`)
+Averages over 5 evaluation seeds of 1-hour episodes on the 2-intersection network. The PPO agent never saw these seeds in training. The original flow file is deterministic, so it runs once.
 
 | Scenario | Controller | Avg travel time (s) | Avg queue (veh) | Throughput (veh) | Completed | Episodes |
 |---|---|---|---|---|---|---|
 | low | legacy_1s_cycle | 49.3 ± 0.3 | 0.03 ± 0.00 | 1067 ± 19 | 98.7% | 5 |
 | low | fixed_time | 93.7 ± 2.4 | 6.44 ± 0.29 | 1062 ± 20 | 98.2% | 5 |
 | low | max_pressure | 61.5 ± 0.3 | 1.64 ± 0.03 | 1065 ± 19 | 98.4% | 5 |
+| low | actuated | 64.5 ± 0.9 | 1.90 ± 0.10 | 1064 ± 19 | 98.3% | 5 |
+| low | ppo | 60.2 ± 0.6 | 1.43 ± 0.05 | 1066 ± 19 | 98.5% | 5 |
 | medium | legacy_1s_cycle | 52.0 ± 0.4 | 0.07 ± 0.01 | 2160 ± 27 | 98.6% | 5 |
 | medium | fixed_time | 119.6 ± 9.0 | 20.31 ± 2.49 | 2120 ± 18 | 96.8% | 5 |
 | medium | max_pressure | 70.2 ± 0.9 | 5.51 ± 0.24 | 2146 ± 22 | 97.9% | 5 |
+| medium | actuated | 77.7 ± 0.9 | 7.78 ± 0.26 | 2144 ± 25 | 97.9% | 5 |
+| medium | ppo | 67.5 ± 0.5 | 4.78 ± 0.10 | 2151 ± 26 | 98.2% | 5 |
 | high | legacy_1s_cycle | 59.1 ± 0.8 | 0.58 ± 0.08 | 3231 ± 45 | 98.3% | 5 |
 | high | fixed_time | 314.5 ± 15.3 | 70.83 ± 3.06 | 2784 ± 39 | 92.6% | 5 |
 | high | max_pressure | 112.5 ± 6.1 | 25.64 ± 2.72 | 3160 ± 44 | 96.1% | 5 |
+| high | actuated | 96.0 ± 3.9 | 19.79 ± 1.81 | 3191 ± 43 | 97.1% | 5 |
+| high | ppo | 81.3 ± 1.5 | 12.93 ± 0.65 | 3204 ± 44 | 97.5% | 5 |
 | original | legacy_1s_cycle | 1344.6 ± 0.0 | 59.97 ± 0.00 | 2754 ± 0 | 91.9% | 1 |
 | original | fixed_time | 1426.3 ± 0.0 | 83.32 ± 0.00 | 2300 ± 0 | 92.4% | 1 |
 | original | max_pressure | 1072.3 ± 0.0 | 48.48 ± 0.00 | 4444 ± 0 | 96.1% | 1 |
+| original | actuated | 1026.7 ± 0.0 | 51.27 ± 0.00 | 4722 ± 0 | 96.4% | 1 |
+| original | ppo | 938.3 ± 0.0 | 43.54 ± 0.00 | 5235 ± 0 | 97.1% | 1 |
 
 ![Average travel time](results/evaluation/travel_time.png)
 
 Takeaways:
-- **Max-pressure beats the fixed-time plan everywhere**, cutting average travel time by about a third at low demand and by almost two thirds at high demand.
-- **The original "change phase every second" baseline looks best, but only because CityFlow doesn't penalize it.** CityFlow has no yellow time or start-up loss, so flicking through phases every second lets vehicles through almost without stopping. At medium demand, cycling the four main phases once per second gives about 50 s average travel time, but cycling them once every 3 s gives over 400 s. Real signals can't switch like that, so the RL agents need to be held to the same minimum green and clearance times as the baselines before they can be compared fairly. Step 3 makes that change.
-- The original flow file (one car every 2 s on every straight route, with no turns) is far beyond the network's capacity for every controller, which made it a poor test case on its own.
+- **PPO beats every realistic controller at every demand level.** Its average travel time is 60 s vs 64 s for actuated control at low demand, 68 s vs 78 s at medium, and 81 s vs 96 s at high (15% faster than actuated and 28% faster than max-pressure at high demand). It also beats them on the original flow file. The margin over max-pressure at low demand is small (60.2 s vs 61.5 s).
+- **Actuated control, the realistic baseline, is far better than a fixed timer** and roughly level with max-pressure. It's better than max-pressure at high demand, where max-pressure's 10 s re-decisions switch too often.
+- **The original "change phase every second" baseline looks best, but only because CityFlow doesn't penalize it.** CityFlow has no yellow time or start-up loss, so flicking through phases every second lets vehicles through almost without stopping. At medium demand, cycling the four main phases once per second gives about 50 s average travel time, but cycling them once every 3 s gives over 400 s. Real signals can't switch like that, which is why the RL agents are now held to the same timing rules as the realistic baselines.
+- The original flow file (one car every 2 s on every straight route, with no turns) is far beyond the network's capacity for every controller, so it is only shown in the table.
+- A first PPO run with RLlib's default `vf_clip_param=10` did worse than a fixed timer, because the returns are much larger than 10 and the value function couldn't learn. Raising the clip and using `gamma=0.95` per 5 s decision fixed it.
 
 ### Class project results (reward-based, superseded)
 These compare the environment's own reward rather than traffic outcomes. They were produced with agents on the 6 light-less intersections and a phase-every-second baseline, so they aren't comparable with the table above.
