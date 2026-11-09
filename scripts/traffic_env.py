@@ -41,21 +41,16 @@ class TrafficSignalEnv(MultiAgentEnv):
         with open(self.config_file, "r") as f:
             config = json.load(f)
         config["dir"] = str(CONFIGS_DIR) + os.sep
-        # Optional overrides, used by the evaluation harness to run generated
-        # traffic scenarios (paths are relative to configs/) with a given seed.
-        if flow_file is not None:
-            config["flowFile"] = str(flow_file)
-        if seed is not None:
-            config["seed"] = int(seed)
         if save_replay is not None:
             config["saveReplay"] = bool(save_replay)
         if config.get("saveReplay"):
             for key in ("roadnetLogFile", "replayLogFile"):
                 (CONFIGS_DIR / config[key]).resolve().parent.mkdir(parents=True, exist_ok=True)
-        self._resolved_config = tempfile.NamedTemporaryFile("w", suffix=".json", prefix="cityflow_config_", delete=False)
-        json.dump(config, self._resolved_config)
-        self._resolved_config.close()
-        self.engine = cityflow.Engine(self._resolved_config.name, thread_num=1)
+        self._base_config = config
+        self._resolved_config = None
+        # Optional overrides, used to run generated traffic scenarios (paths are
+        # relative to configs/) with a given seed.
+        self._make_engine(flow_file, seed)
 
         if road_network_file is None:
             self.road_network_file = (CONFIGS_DIR / config["roadnetFile"]).resolve()
@@ -82,8 +77,55 @@ class TrafficSignalEnv(MultiAgentEnv):
             agent: spaces.Discrete(len(self.intersections[i]["trafficLight"]["lightphases"])) for i, agent in enumerate(self.agents)
         })
 
+    def _make_engine(self, flow_file=None, seed=None):
+        """(Re)create the CityFlow engine, optionally with another flow file or seed."""
+        config = dict(self._base_config)
+        if flow_file is not None:
+            config["flowFile"] = str(flow_file)
+        if seed is not None:
+            config["seed"] = int(seed)
+        if self._resolved_config is None:
+            self._resolved_config = tempfile.NamedTemporaryFile("w", suffix=".json", prefix="cityflow_config_", delete=False)
+            self._resolved_config.close()
+        with open(self._resolved_config.name, "w") as f:
+            json.dump(config, f)
+        self.engine = cityflow.Engine(self._resolved_config.name, thread_num=1)
+
+    def _start_episode_stats(self):
+        self._queue_samples = []
+        self._seen_vehicles = set()
+
+    def _record_second(self, lane_waiting_counts=None):
+        """Track traffic outcomes after every simulated second (see episode_metrics)."""
+        if lane_waiting_counts is None:
+            lane_waiting_counts = self.engine.get_lane_waiting_vehicle_count()
+        self._queue_samples.append(np.mean([
+            sum(lane_waiting_counts.get(lane, 0) for road in self.incoming_roads[i] for lane in self.roads[road])
+            for i in range(self.num_intersections)
+        ]))
+        self._seen_vehicles.update(self.engine.get_vehicles(include_waiting=False))
+
+    def episode_metrics(self):
+        """Traffic outcomes for the episode so far.
+
+        avg_travel_time_s: CityFlow's average travel time over all vehicles that entered
+                           (vehicles still in the network count up to now)
+        avg_queue:         mean waiting vehicles per signalised intersection, sampled every second
+        throughput:        vehicles that completed their trip
+        completion_rate:   throughput / vehicles that entered the network
+        """
+        in_network = set(self.engine.get_vehicles(include_waiting=False))
+        throughput = len(self._seen_vehicles - in_network)
+        return {
+            "avg_travel_time_s": self.engine.get_average_travel_time(),
+            "avg_queue": float(np.mean(self._queue_samples)) if self._queue_samples else 0.0,
+            "throughput": throughput,
+            "completion_rate": throughput / len(self._seen_vehicles) if self._seen_vehicles else float("nan"),
+        }
+
     def reset(self, *, seed=None, options=None):
         self.engine.reset()
+        self._start_episode_stats()
         self.previous_vehicle_count = self.engine.get_vehicle_count()
         lane_vehicle_counts = self.engine.get_lane_vehicle_count()
         lane_waiting_counts = self.engine.get_lane_waiting_vehicle_count()
@@ -102,6 +144,7 @@ class TrafficSignalEnv(MultiAgentEnv):
         # Query lane statistics once per step instead of once per lane.
         lane_vehicle_counts = self.engine.get_lane_vehicle_count()
         lane_waiting_counts = self.engine.get_lane_waiting_vehicle_count()
+        self._record_second(lane_waiting_counts)
         observations = {
             f"agent_{i}": self._get_observation_for_agent(i, lane_vehicle_counts, lane_waiting_counts)
             for i in range(self.num_intersections)
