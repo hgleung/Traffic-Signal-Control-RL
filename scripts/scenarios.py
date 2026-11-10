@@ -21,6 +21,14 @@ Networks (see NETWORKS):
   turn at every intersection they pass (a random walk using TURN_PROBS), so
   routes cross several signals.
 
+* "calaveras": Calaveras Blvd (SR 237) in Milpitas, CA, from Abel St to
+  Milpitas Blvd (scripts/build_calaveras.py). Entry volumes and turning shares
+  come from configs/calaveras/demand.json: "high" is the estimated 2024 PM
+  peak hour, "medium" and "low" are 75% and 50% of it. Arrivals are Poisson and
+  vehicles turn at each signal according to that approach's shares.
+  The network has marked crosswalks with pedestrians (configs/calaveras/
+  pedestrians.json, scripts/pedestrians.py).
+
 Generated flow files are written to configs/generated/ (git-ignored) and are
 passed to TrafficSignalEnv via its flow_file argument.
 """
@@ -58,7 +66,19 @@ NETWORKS = {
         "levels": {"low": 0.03, "medium": 0.06, "high": 0.09},
         "arterial_rows": (2, 3),
     },
+    "calaveras": {
+        "config": "calaveras/config.json",
+        "roadnet": "calaveras/roadnet.json",
+        "demand": "calaveras/demand.json",
+        "pedestrians": "calaveras/pedestrians.json",
+        "signal_plan": "calaveras/signal_plan.json",
+        # Share of the estimated PM-peak volumes.
+        "levels": {"low": 0.5, "medium": 0.75, "high": 1.0},
+    },
 }
+# Road id suffix (direction of travel: 0 east, 1 north, 2 west, 3 south) -> side of the
+# intersection the road arrives from.
+APPROACH_SIDE = {"0": "W", "1": "S", "2": "E", "3": "N"}
 ARTERIAL_FACTOR = 2.0
 RUSH_HOUR = (0.6, 1.4)  # demand multiplier at the start/end and at the peak
 MAX_ROUTE_ROADS = 12
@@ -152,6 +172,35 @@ def _grid_flows(spec, level, seed, horizon):
     return flows
 
 
+def _calaveras_flows(spec, level, seed, horizon):
+    """Poisson arrivals at each entry; at every signal a vehicle turns by its approach's shares."""
+    virtual, roads, movements = _load_network(CONFIGS_DIR / spec["roadnet"])
+    demand = json.loads((CONFIGS_DIR / spec["demand"]).read_text())
+    scale = spec["levels"][level]
+    shares = demand["turn_shares_left_through_right"]
+    names = ["turn_left", "go_straight", "turn_right"]
+    rng = np.random.default_rng(seed)
+    flows = []
+    for key, volume in sorted(demand["entry_veh_per_hour"].items()):
+        entry = demand["entry_roads"][key]
+        rate = volume * scale / 3600.0
+        t = rng.exponential(1.0 / rate)
+        while t < horizon:
+            route = [entry]
+            while roads[route[-1]]["endIntersection"] not in virtual:
+                road = route[-1]
+                side = APPROACH_SIDE[road.rsplit("_", 1)[1]]
+                p = np.array(shares[f"{roads[road]['endIntersection']}:{side}"], dtype=float)
+                options = movements.get(road, {})
+                p = np.array([pi if n in options else 0.0 for pi, n in zip(p, names)])
+                route.append(options[names[rng.choice(3, p=p / p.sum())]])
+            second = int(t)
+            flows.append({"vehicle": VEHICLE, "route": route, "interval": 1.0,
+                          "startTime": second, "endTime": second})
+            t += rng.exponential(1.0 / rate)
+    return flows
+
+
 def generate_flow(level, seed, horizon, roadnet_file=DEFAULT_ROADNET, cache=False, network="1x2"):
     """Write a randomized flow file and return its path relative to configs/.
 
@@ -165,6 +214,10 @@ def generate_flow(level, seed, horizon, roadnet_file=DEFAULT_ROADNET, cache=Fals
     path = GENERATED_DIR / f"{prefix}_{level}_seed{seed}_h{horizon}.json"
     if cache and path.exists():
         return path.relative_to(CONFIGS_DIR).as_posix()
+    if network == "calaveras":
+        flows = _calaveras_flows(NETWORKS[network], level, seed, horizon)
+        flows.sort(key=lambda f: f["startTime"])
+        return _write_flows(flows, path)
     if network != "1x2":
         flows = _grid_flows(NETWORKS[network], level, seed, horizon)
         flows.sort(key=lambda f: f["startTime"])

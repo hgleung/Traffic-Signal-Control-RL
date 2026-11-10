@@ -7,18 +7,21 @@ This project uses Reinforcement Learning (RL) to control traffic signals in the 
 
 **The catch, and the fix:** with no limit on how long a red can last, PPO sometimes leaves a single car stopped for 6-7 minutes, while actuated control never holds one for more than about 2 minutes. A 90 s maximum red, enforced on top of the same trained agent, brings PPO's worst case down to actuated control's level and still beats actuated control's average travel time on both networks (10% faster in heavy traffic on both). See [Worst-case waits](#worst-case-waits) and [Capping red time](#capping-red-time).
 
+**On a real street, the advantage doesn't survive pedestrians and the cap.** On a model of Calaveras Blvd (SR 237) in Milpitas, CA, with its real marked crosswalks and pedestrians pushing the button, PPO is again the fastest controller in the evening peak (9% faster than actuated control), but only by never serving one crosswalk: some pedestrians wait the whole hour. With the same 90 s cap applied to cars and pedestrians, PPO serves everyone but becomes 47% slower than actuated control, and retraining with the cap didn't fix it. Actuated control, which handles pedestrian calls natively, is the best all-round controller there. See [Findings: Calaveras Blvd](#findings-calaveras-blvd-milpitas-ca).
+
 ## Features
 - **Multi-agent RL environment** for CityFlow with realistic signal timing (`scripts/signal_env.py`)
 - **PPO and DQN agents** (RLlib) sharing one policy across intersections
 - **Realistic baselines**: fixed-time, detector-based actuated control and max-pressure
 - **Randomized, seeded traffic scenarios**, with separate seeds for training and evaluation
-- **Two networks**: a two-intersection corridor and a 4x4 grid with arterials and a rush-hour peak
+- **Three networks**: a two-intersection corridor, a 4x4 grid with arterials and a rush-hour peak, and a model of a real street, Calaveras Blvd in Milpitas, CA
+- **Pedestrians** at signalised crosswalks (push-button calls, WALK and clearance times, right turns yielding), which CityFlow doesn't simulate natively
 - **Evaluation on traffic outcomes**: travel time, queue length, throughput, completion rate and worst-case waits
 - Dockerfile, pinned dependencies and tests
 
 ## Project Structure
 ```
-├── configs/           # Simulation and network configuration files (grid4x4/ is the 4x4 grid)
+├── configs/           # Simulation and network configuration files (grid4x4/ is the 4x4 grid, calaveras/ is Calaveras Blvd)
 ├── docs/              # Report and presentation slides (PDF)
 ├── data/              # Collected rewards and results (e.g., fixed_rewards.csv)
 ├── frontend/          # Visualization and replay tools
@@ -33,7 +36,9 @@ This project uses Reinforcement Learning (RL) to control traffic signals in the 
 │   ├── train_ppo.py   # Train PPO (shared policy) on randomized traffic
 │   ├── train_dqn.py   # Train DQN with the same setup
 │   ├── plot_training.py # Training curves
-│   ├── scenarios.py   # Randomized low/medium/high demand scenarios for both networks
+│   ├── scenarios.py   # Randomized low/medium/high demand scenarios for every network
+│   ├── build_calaveras.py # Builds the Calaveras Blvd network, crosswalks, demand and estimated signal plan
+│   ├── pedestrians.py # Pedestrian layer: button calls, WALK/clearance timing, right-turn yielding
 │   ├── ppo.py         # PPO RL agent implementation
 │   ├── traffic_env.py # Environment wrapper for CityFlow
 │   ├── traffic_env_ppo.py # Policy evaluation and utility functions
@@ -131,7 +136,18 @@ Each training run takes about 28 minutes on 4 CPU cores. Results go to `results/
 
 `--neighbors` adds the waiting counts on the adjacent intersections' incoming roads to each agent's observation.
 
-#### 5. Visualize Results
+#### 5. Calaveras Blvd (a real street, with pedestrians)
+```bash
+python scripts/build_calaveras.py                        # regenerates configs/calaveras/ (already committed)
+python scripts/train_ppo.py --network calaveras --iterations 250 --out models/ppo_calaveras         # ~50 min
+python scripts/train_dqn.py --network calaveras --timesteps 600000 --out models/dqn_calaveras       # ~65 min
+python scripts/evaluate.py --network calaveras --policy ppo=models/ppo_calaveras ppo90=models/ppo_calaveras:max_red=90 dqn=models/dqn_calaveras
+python scripts/evaluate.py --network calaveras --no-peds   # without pedestrians
+python scripts/evaluate.py --network calaveras --ped-scale 3   # three times the pedestrians
+```
+Results go to `results/evaluation_calaveras/`. The baselines on this network are `fixed_plan` (the estimated real timing, see below), `fixed_time` (the generic 30 s plan, for reference), `actuated` and `max_pressure`.
+
+#### 6. Visualize Results
 Use the notebook or `scripts/results/create_graph.py` to visualize reward curves:
 ```bash
 python scripts/results/create_graph.py
@@ -240,6 +256,50 @@ High demand, mean ± std over seeds 0-4, in seconds:
 4. **Retraining with the limit didn't help.** The agent trained with a 60 s limit, and shown each lane's red time, did no better than the original agent with the same limit added afterwards. A fixed safety rule on top of the trained policy is simpler and works as well. We didn't retrain at 90 s.
 
 Both `summary.md` files also list the 95th-percentile and longest trip times for every controller and demand level. On the original traffic file the trip-time columns only cover the few vehicles that finished, so they aren't comparable across controllers.
+
+### Findings: Calaveras Blvd (Milpitas, CA)
+The question: does the RL advantage hold on a real street? We modelled Calaveras Blvd (SR 237) from Abel St to Milpitas Blvd, the segment VTA monitors and plans to widen, including its pedestrian crossings.
+
+**What the model is built from.** Public sources, plus estimates where the data isn't public (all in `scripts/build_calaveras.py`):
+- *Real:* the three signals on the segment, west to east Abel St, the Main St/Carlo St ramps and Milpitas Blvd, and their marked crosswalks (Abel 4 of 4 legs, Milpitas Blvd 4 of 4, Main/Carlo 1 of 2), from the [Caltrans SR 237 Transportation Concept Report](https://dot.ca.gov/-/media/dot-media/district-4/documents/d4-transportation-planning-local-assistance/system-regional-planning/tcrs/f0020307_sr237_tcr-a11y.pdf). The same report gives the 2-lanes-each-way overpass between Abel and Milpitas Blvd, 35-40 mph speeds and the heavy eastbound evening peak. VTA's [2024 CMP Monitoring Report](https://www.vta.org/sites/default/files/2026-02/2024_VTA_CMP_Monitoring_Report.pdf) rates the evening peak LOS F at Abel and LOS D at Milpitas Blvd.
+- *Estimated:* turning volumes (VTA's fall 2024 counts are in an appendix that isn't posted), distances and turn lanes (OpenStreetMap couldn't be reached), which side the Main/Carlo ramp is on, pedestrian volumes (no public counts; 6-30 per hour per crosswalk) and the signal timing (Caltrans' timing sheets need a records request).
+- *Calibration:* volumes were adjusted until the estimated timing reproduces VTA's ratings. Under it, average delay is about 86 s at Abel (LOS F, over 80 s) and 53 s at Milpitas Blvd (LOS D, 35-55 s). "High" demand is this estimated 2024 evening peak hour; "medium" and "low" are 75% and 50% of it.
+- *Estimated real timing (`fixed_plan`):* a coordinated pre-timed plan from Webster's method, with a common 150 s cycle (the usual maximum; the corridor is over capacity), offsets for eastbound progression, and every pedestrian phase long enough for WALK plus clearance. The Main/Carlo crosswalk has a pedestrian-only phase that runs only when someone pushes the button. Actuated control's maximum greens are set to 1.25x this plan's greens.
+
+**How pedestrians are modelled** (`scripts/pedestrians.py`). CityFlow has no pedestrians, so they are modelled the way a signal controller sees them:
+- Pedestrians arrive at each crosswalk at random and push the button.
+- A crosswalk runs with the parallel vehicle green. When that green starts and someone is waiting, WALK starts (7 s), followed by a clearance long enough to cross at 3.5 ft/s (MUTCD). Crossing Calaveras at Abel takes 7 + 26 = 33 s.
+- That green can't end until the clearance is over, whatever the controller wants. This is the main way pedestrians constrain signal control: one button press on a side street forces a long side-street green.
+- During WALK, right turns across that crosswalk are held, as drivers yield.
+- Every controller sees the calls. Actuated control treats them like detector calls, max-pressure counts each waiting pedestrian like a queued car, and RL agents see how long pedestrians have waited, with waiting pedestrians in their reward. The max-red cap also covers pedestrians.
+- Not modelled: pedestrians crossing outside the marked crosswalks, and the unmarked crossing at Main/Carlo.
+
+Evening peak ("high"), mean ± std over seeds 0-4, in seconds:
+
+| Controller | Avg travel time | 95th pct. time stopped | Longest single car stop | Pedestrian avg wait | Longest pedestrian wait |
+|---|---|---|---|---|---|
+| Estimated real timing (Webster, coordinated) | 187.7 ± 10.9 | 268 ± 25 | 136 ± 0 | 69 ± 4 | 146 ± 3 |
+| **Actuated** | 186.4 ± 8.8 | **256 ± 20** | 177 ± 9 | 87 ± 4 | 193 ± 5 |
+| Max-pressure | 253.5 ± 10.7 | 474 ± 38 | 1146 ± 357 | 80 ± 17 | 1563 ± 803 |
+| PPO, no limit | **169.9 ± 5.1** | 268 ± 18 | 615 ± 103 | 123 ± 28 | 2903 ± 557 |
+| PPO + 90 s max red | 274.7 ± 14.5 | 506 ± 34 | 179 ± 35 | 57 ± 3 | 137 ± 12 |
+| PPO + 120 s max red | 215.5 ± 12.9 | 373 ± 45 | 199 ± 31 | 63 ± 2 | 157 ± 6 |
+| PPO retrained with 90 s max red | 277.0 ± 18.8 | 580 ± 59 | 182 ± 34 | 53 ± 2 | 135 ± 10 |
+| DQN, no limit | 257.3 ± 6.4 | 521 ± 37 | 960 ± 152 | 153 ± 32 | 2903 ± 557 |
+| DQN + 90 s max red | 286.0 ± 17.0 | 617 ± 72 | 231 ± 23 | 52 ± 3 | 125 ± 3 |
+
+![Average travel time on Calaveras Blvd](results/evaluation_calaveras/travel_time.png)
+
+1. **Without limits, PPO is still the fastest, but it leaves people behind.** In the evening peak its average trip is 170 s, 9% faster than actuated control (186 s) and the estimated real timing (188 s). It is also fastest in lighter traffic (107 s vs 117 s at "low"). But it gets there by almost never running the pedestrian-only phase at the Main/Carlo crosswalk, which would stop both directions of the bottleneck overpass: in every run, someone who arrives early in the hour is still waiting at the end (the 2,903 s longest wait is capped by the episode length). Its longest single car stop is over 10 minutes.
+2. **With the 90 s cap, the advantage disappears in heavy traffic.** The cap fixes the worst cases (no car stop over about 3 minutes, every pedestrian served within about 2 minutes), but PPO's average trip rises to 275 s, 47% slower than actuated control. Most forced switches serve cars, not pedestrians (about 3 in 4 in one peak-hour run, mostly at Abel and Milpitas Blvd). Several approaches likely hit the limit at once, and the forced short greens waste capacity, as the 60 s cap did on the grid. In light traffic the capped agent ties with actuated control (116 s vs 117 s); at medium demand it is 11% slower.
+3. **Retraining doesn't fix it, and loosening the cap only narrows the gap.** PPO retrained with the 90 s cap in place (and red times in its observation) did no better (277 s). A 120 s cap gets PPO to 216 s, still 16% slower than actuated control in the peak, with a longer worst-case stop.
+4. **Actuated control is the best all-round controller here.** It matches the estimated real timing on average and has the lowest 95th-percentile stopped time, and every pedestrian is served within about 3 minutes. It is the only controller that is never far from the best on any metric. Pedestrians cost it about 6 s per trip in the peak (180 s with pedestrians turned off).
+5. **DQN and max-pressure do poorly.** DQN learned a weaker policy than PPO here (257 s, worse than actuated control even without the cap). Max-pressure is 36% slower than actuated control and also strands pedestrians and side-street cars for many minutes, because a single pedestrian rarely outweighs a queue of cars.
+6. **A generic 30 s plan is not a fair stand-in for the real timing.** The 4-phase, 30 s plan used on the synthetic networks takes 587 s per trip here, because it gives fixed time to phases with little or no traffic. Against the estimated real plan, the "RL beats fixed timing" margin shrinks from 71% to 9%.
+
+**What this depends on.** The volumes, distances, pedestrian demand and timing are estimates calibrated to two public LOS ratings, not measurements, so treat the numbers as indicative. The comparison between controllers is fair (same traffic, same rules), but absolute travel times would change with the real counts. The next steps that would most improve the model are the VTA 2024 turning-movement counts (Appendix G of the CMP report, from VTA's congestion management staff), Caltrans' signal timing sheets (via a public records request) and checking the lane geometry against aerial photos.
+
+The full tables for all three demand levels are in [`results/evaluation_calaveras/summary.md`](results/evaluation_calaveras/summary.md).
 
 ## References
 - [CityFlow: An Open-source Traffic Simulator](https://cityflow-project.github.io/)

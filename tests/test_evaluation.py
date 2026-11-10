@@ -64,7 +64,7 @@ def test_max_pressure_holds_minimum_green():
     assert all(length >= 10 for phase, length in runs[1:] if phase != CLEARANCE_PHASE)
 
 
-@pytest.mark.parametrize("name", list(BASELINES))
+@pytest.mark.parametrize("name", [b for b in BASELINES if b != "fixed_plan"])  # fixed_plan: see test_calaveras.py
 def test_every_baseline_completes_an_episode(name):
     env = TrafficSignalEnv(HORIZON, flow_file=generate_flow("medium", 0, HORIZON), save_replay=False)
     metrics = run_episode(env, BASELINES[name]())

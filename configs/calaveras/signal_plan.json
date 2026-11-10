@@ -1,0 +1,85 @@
+{
+ "cycle_s": 150,
+ "clearance_s": 5,
+ "intersections": {
+  "intersection_abel": {
+   "name": "Abel St",
+   "sequence": [
+    [
+     1,
+     47
+    ],
+    [
+     2,
+     33
+    ],
+    [
+     3,
+     12
+    ],
+    [
+     4,
+     38
+    ]
+   ],
+   "offset_s": 0,
+   "critical_flow_ratio": {
+    "1": 0.321,
+    "2": 0.194,
+    "3": 0.078,
+    "4": 0.265
+   }
+  },
+  "intersection_main_carlo": {
+   "name": "Main St / Carlo St ramps",
+   "sequence": [
+    [
+     1,
+     81
+    ],
+    [
+     2,
+     36
+    ],
+    [
+     3,
+     18
+    ]
+   ],
+   "offset_s": 29,
+   "critical_flow_ratio": {
+    "1": 0.453,
+    "2": 0.0,
+    "3": 0.086
+   }
+  },
+  "intersection_milpitas": {
+   "name": "Milpitas Blvd",
+   "sequence": [
+    [
+     1,
+     58
+    ],
+    [
+     2,
+     36
+    ],
+    [
+     3,
+     21
+    ],
+    [
+     4,
+     15
+    ]
+   ],
+   "offset_s": 64,
+   "critical_flow_ratio": {
+    "1": 0.366,
+    "2": 0.092,
+    "3": 0.129,
+    "4": 0.088
+   }
+  }
+ }
+}

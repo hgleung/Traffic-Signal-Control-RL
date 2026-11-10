@@ -62,11 +62,15 @@ def main():
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--gamma", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--network", choices=["1x2", "4x4", "calaveras"], default="1x2")
+    parser.add_argument("--max-red", type=int, default=None,
+                        help="longest a lane may hold a stopped vehicle at red (s); enforced by overriding the agent")
     parser.add_argument("--out", type=Path, default=REPO_ROOT / "models" / "dqn_timed")
     args = parser.parse_args()
 
     init_ray()
-    algo = build_config({"reward": args.reward}, args.timesteps, num_env_runners=args.num_env_runners,
+    env_config = {"reward": args.reward, "network": args.network, "max_red": args.max_red}
+    algo = build_config(env_config, args.timesteps, num_env_runners=args.num_env_runners,
                         lr=args.lr, gamma=args.gamma, seed=args.seed).build()
 
     args.out.mkdir(parents=True, exist_ok=True)

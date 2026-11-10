@@ -1,0 +1,12 @@
+{
+ "interval": 1.0,
+ "seed": 0,
+ "dir": "../configs/",
+ "roadnetFile": "calaveras/roadnet.json",
+ "flowFile": "calaveras/flow_sample.json",
+ "rlTrafficLight": true,
+ "laneChange": true,
+ "saveReplay": false,
+ "roadnetLogFile": "../logs/calaveras/roadnet_log.json",
+ "replayLogFile": "../logs/calaveras/replay.txt"
+}

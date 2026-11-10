@@ -1,0 +1,96 @@
+{
+ "walk_s": 7,
+ "ped_speed_mps": 1.07,
+ "intersections": {
+  "intersection_abel": {
+   "name": "Abel St",
+   "crosswalks": [
+    {
+     "leg": "N",
+     "length_m": 18.0,
+     "phase": 1,
+     "clearance_s": 17,
+     "peds_per_hour": 20
+    },
+    {
+     "leg": "S",
+     "length_m": 18.0,
+     "phase": 1,
+     "clearance_s": 17,
+     "peds_per_hour": 20
+    },
+    {
+     "leg": "E",
+     "length_m": 30.8,
+     "phase": 2,
+     "clearance_s": 29,
+     "peds_per_hour": 20
+    },
+    {
+     "leg": "W",
+     "length_m": 27.2,
+     "phase": 2,
+     "clearance_s": 26,
+     "peds_per_hour": 20
+    }
+   ],
+   "walk_variant": {
+    "1": 9,
+    "2": 10
+   }
+  },
+  "intersection_main_carlo": {
+   "name": "Main St / Carlo St ramps",
+   "crosswalks": [
+    {
+     "leg": "E",
+     "length_m": 30.8,
+     "phase": 2,
+     "clearance_s": 29,
+     "peds_per_hour": 6
+    }
+   ],
+   "walk_variant": {
+    "1": 9,
+    "2": 10
+   }
+  },
+  "intersection_milpitas": {
+   "name": "Milpitas Blvd",
+   "crosswalks": [
+    {
+     "leg": "N",
+     "length_m": 21.6,
+     "phase": 1,
+     "clearance_s": 21,
+     "peds_per_hour": 30
+    },
+    {
+     "leg": "S",
+     "length_m": 21.6,
+     "phase": 1,
+     "clearance_s": 21,
+     "peds_per_hour": 30
+    },
+    {
+     "leg": "E",
+     "length_m": 27.2,
+     "phase": 2,
+     "clearance_s": 26,
+     "peds_per_hour": 30
+    },
+    {
+     "leg": "W",
+     "length_m": 30.8,
+     "phase": 2,
+     "clearance_s": 29,
+     "peds_per_hour": 30
+    }
+   ],
+   "walk_variant": {
+    "1": 9,
+    "2": 10
+   }
+  }
+ }
+}

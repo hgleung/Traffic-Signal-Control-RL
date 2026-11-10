@@ -10,12 +10,34 @@ Phase layout of CityFlow's generated intersections (see the road network file):
   phases 1-4  : the standard 4-phase plan (E-W straight, N-S straight,
                 E-W left, N-S left)
   phases 5-8  : single-approach phases (straight + left from one direction)
+
+Networks with pedestrians (env.peds, see scripts/pedestrians.py) add two rules
+that every controller follows: a green can't end while a pedestrian WALK or
+clearance interval runs, and phases with a pedestrian call need serving.
+Actuated control treats a pedestrian call like a detector call, max-pressure
+counts each waiting pedestrian like a queued vehicle, and the pre-timed plan
+gives the pedestrian phases enough green every cycle.
 """
 import json
 
 import numpy as np
 
 CLEARANCE_PHASE = 0
+MAX_GREEN_PHASE = 8  # lightphases above this are pedestrian WALK variants
+
+
+def green_phases(intersection):
+    return list(range(1, min(MAX_GREEN_PHASE + 1, len(intersection["trafficLight"]["lightphases"]))))
+
+
+def ped_holding(env, idx, t):
+    peds = getattr(env, "peds", None)
+    return peds is not None and peds.holding(idx, env.engine.get_current_time())
+
+
+def ped_calls(env, idx):
+    peds = getattr(env, "peds", None)
+    return peds.calls(idx) if peds is not None else set()
 
 
 class Controller:
@@ -72,7 +94,7 @@ class _PhaseSwitcher(Controller):
                 self.phase[idx] = self.next_phase[idx]
                 self.green_start[idx] = t
                 self.clearance_until[idx] = None
-            elif t - self.green_start[idx] >= self.min_green:
+            elif t - self.green_start[idx] >= self.min_green and not ped_holding(env, idx, t):
                 desired = self.choose(env, idx, t)
                 if desired != self.phase[idx]:
                     if self.clearance > 0:
@@ -130,7 +152,7 @@ class MaxPressure(_PhaseSwitcher):
                 movements.append((link["type"], lane_pairs))
             self._movements.append(movements)
             lightphases = intersection["trafficLight"]["lightphases"]
-            candidates = self.phases or [p for p in range(len(lightphases)) if p != CLEARANCE_PHASE]
+            candidates = self.phases or green_phases(intersection)
             self._phase_links.append({p: lightphases[p]["availableRoadLinks"] for p in candidates})
         super().reset(env)
 
@@ -147,6 +169,12 @@ class MaxPressure(_PhaseSwitcher):
                 outgoing = {b for _, b in lane_pairs}
                 pressure += sum(counts.get(l, 0) for l in incoming) - np.mean([counts.get(l, 0) for l in outgoing])
             pressures[phase] = pressure
+        peds = getattr(env, "peds", None)
+        if peds is not None:
+            # Waiting pedestrians count like queued vehicles on the phase that serves them.
+            for k, cw in enumerate(peds.crosswalks[idx]):
+                if cw["phase"] in pressures:
+                    pressures[cw["phase"]] += len(peds.waiting[idx][k])
         best = max(pressures.values())
         # Keep the current phase on ties to avoid needless switching.
         if pressures.get(self.phase[idx]) == best:
@@ -212,6 +240,16 @@ class Actuated(_PhaseSwitcher):
                     for ll in links[k]["laneLinks"]
                 })
             self._phase_lanes.append(lanes)
+        # Maximum greens: the default everywhere, or, for networks with an
+        # estimated signal plan, 1.25 x that plan's green for the phase (at least
+        # the default), as practitioners usually set them.
+        self._max_green = [dict.fromkeys(self.phases, self.max_green) for _ in env.intersections]
+        plan = getattr(env, "signal_plan", None)
+        if plan:
+            for idx, intersection in enumerate(env.intersections):
+                for p, green in plan["intersections"][intersection["id"]]["sequence"]:
+                    if p in self._max_green[idx]:
+                        self._max_green[idx][p] = max(self.max_green, int(round(1.25 * green)))
         n = len(env.agents)
         self._last_detection = [-np.inf] * n
         self._detected_t = None
@@ -247,14 +285,81 @@ class Actuated(_PhaseSwitcher):
         occupied = self._detections(env, t)
         current = self.phase[idx]
         order = self.phases[self.phases.index(current) + 1:] + self.phases[:self.phases.index(current)]
-        calls = [p for p in order if any(l in occupied for l in self._phase_lanes[idx][p])]
+        peds = ped_calls(env, idx)
+        calls = [p for p in order if p in peds or any(l in occupied for l in self._phase_lanes[idx][p])]
         if not calls:
             return current  # rest in green
         green_time = t - self.green_start[idx]
         gapped_out = t - self._last_detection[idx] >= self.passage_time
-        if gapped_out or green_time >= self.max_green:
+        if gapped_out or green_time >= self._max_green[idx][current]:
             return calls[0]
         return current
+
+
+class FixedPlan(Controller):
+    """A coordinated pre-timed plan read from the network's signal_plan.json.
+
+    Every intersection runs the same cycle with its own phase sequence, green
+    times and offset (see scripts/build_calaveras.py, which estimates them with
+    Webster's method). A phase that serves only pedestrians (no vehicle
+    movement) is skipped when nobody has pushed the button, and its time goes to
+    the green before it, so the cycle and offsets don't drift.
+    """
+    name = "fixed_plan"
+
+    def reset(self, env):
+        plan = getattr(env, "signal_plan", None)
+        if not plan:
+            raise ValueError("fixed_plan needs a network with a signal_plan.json")
+        clearance = plan["clearance_s"]
+        self.cycle = plan["cycle_s"]
+        self.schedule = []
+        for intersection in env.intersections:
+            entry = plan["intersections"][intersection["id"]]
+            ped_only = self._ped_only_phases(intersection)
+            segments, start = [], 0
+            for p, green in entry["sequence"]:
+                segments.append((start, start + green, p, p in ped_only))
+                start += green + clearance
+            self.schedule.append((entry["offset_s"], segments))
+        self.current = [None] * len(env.intersections)
+
+    @staticmethod
+    def _ped_only_phases(intersection):
+        links = intersection["roadLinks"]
+        lightphases = intersection["trafficLight"]["lightphases"]
+        return {p for p in green_phases(intersection)
+                if all(links[k]["type"] == "turn_right" for k in lightphases[p]["availableRoadLinks"])}
+
+    def act(self, env, t):
+        actions = {}
+        for idx, agent in enumerate(env.agents):
+            offset, segments = self.schedule[idx]
+            tau = (t - offset) % self.cycle
+            phase = CLEARANCE_PHASE
+            for k, (start, end, p, ped_only) in enumerate(segments):
+                if start <= tau < end:
+                    phase = p
+                    # Serve a pedestrian-only phase only if the button was pushed
+                    # before it was due; otherwise the green before it continues.
+                    if ped_only and self.current[idx] != p and (
+                            self.current[idx] != CLEARANCE_PHASE or p not in ped_calls(env, idx)):
+                        phase = self._previous_green(segments, k)
+                    break
+                if tau < start:
+                    break
+            # The clearance before a skipped pedestrian-only phase is skipped too.
+            if phase == CLEARANCE_PHASE and self.current[idx] not in (None, CLEARANCE_PHASE):
+                nxt = next((s for s in segments if s[0] > tau), None)
+                if nxt is not None and nxt[3] and nxt[2] not in ped_calls(env, idx):
+                    phase = self.current[idx]
+            self.current[idx] = phase
+            actions[agent] = phase
+        return actions
+
+    @staticmethod
+    def _previous_green(segments, k):
+        return segments[k - 1][2] if k > 0 else segments[-1][2]
 
 
 BASELINES = {
@@ -262,4 +367,5 @@ BASELINES = {
     FixedTime.name: FixedTime,
     MaxPressure.name: MaxPressure,
     Actuated.name: Actuated,
+    FixedPlan.name: FixedPlan,
 }

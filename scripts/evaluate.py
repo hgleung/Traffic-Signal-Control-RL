@@ -6,6 +6,8 @@ For every (scenario, seed, controller) this runs one full episode and records:
   avg_queue          mean number of waiting vehicles per signalised intersection
   throughput         vehicles that completed their trip
   completion_rate    throughput / vehicles that entered the network
+  ped_*_wait_s       networks with pedestrians: average / 95th percentile / longest
+                     wait from pushing the button to WALK
   total_reward       the environment's reward summed over agents, for reference only
                      (trained policies run in TimedSignalEnv, whose reward differs)
 
@@ -31,6 +33,8 @@ from traffic_env import CONFIGS_DIR, REPO_ROOT, TrafficSignalEnv
 
 METRICS = ["avg_travel_time_s", "avg_queue", "throughput", "completion_rate", "p95_wait_s", "max_wait_s",
            "max_stop_s", "p95_trip_s", "max_trip_s", "total_reward"]
+# Only on networks with pedestrians (scripts/pedestrians.py).
+PED_METRICS = ["peds", "ped_avg_wait_s", "ped_p95_wait_s", "ped_max_wait_s"]
 DEFAULT_OUT = REPO_ROOT / "results" / "evaluation"
 
 
@@ -94,7 +98,7 @@ def summarize(rows):
     summary = []
     for (scenario, controller), group in groups.items():
         entry = {"scenario": scenario, "controller": controller, "episodes": len(group)}
-        for metric in METRICS:
+        for metric in METRICS + [m for m in PED_METRICS if m in group[0]]:
             values = np.array([r[metric] for r in group], dtype=float)
             entry[f"{metric}_mean"] = float(values.mean())
             entry[f"{metric}_std"] = float(values.std(ddof=1)) if len(values) > 1 else 0.0
@@ -146,6 +150,23 @@ def write_outputs(rows, summary, out_dir, scenarios, controllers):
                           for m in ("p95_wait_s", "max_wait_s", "max_stop_s", "p95_trip_s", "max_trip_s"))
                 + "|"
             )
+    if "ped_avg_wait_s_mean" in summary[0]:
+        lines += [
+            "",
+            "Pedestrian waits, from pushing the button to WALK (mean ± std over seeds of each episode's value):",
+            "",
+            "| Scenario | Controller | Pedestrians | Avg wait (s) | 95th pct. wait (s) | Longest wait (s) |",
+            "|---|---|---|---|---|---|",
+        ]
+        for scenario in scenarios:
+            for controller in controllers:
+                s = lookup[(scenario, controller)]
+                lines.append(
+                    f"| {scenario} | {controller} | {s['peds_mean']:.0f} "
+                    + "".join(f"| {s[m + '_mean']:.0f} ± {s[m + '_std']:.0f} "
+                              for m in ("ped_avg_wait_s", "ped_p95_wait_s", "ped_max_wait_s"))
+                    + "|"
+                )
     table = "\n".join(lines) + "\n"
     (out_dir / "summary.md").write_text(table)
 
@@ -181,7 +202,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--scenarios", nargs="+", default=list(DEMAND_LEVELS) + [ORIGINAL_SCENARIO],
                         choices=list(DEMAND_LEVELS) + [ORIGINAL_SCENARIO])
-    parser.add_argument("--controllers", nargs="+", default=list(BASELINES), choices=list(BASELINES))
+    parser.add_argument("--controllers", nargs="+", default=None, choices=list(BASELINES),
+                        help="default: every baseline that applies to the network")
     parser.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     parser.add_argument("--horizon", type=int, default=3600, help="episode length in simulated seconds")
     parser.add_argument("--policy", nargs="+", default=[], metavar="NAME=CHECKPOINT",
@@ -190,6 +212,8 @@ def main():
                              "or :max_red=60 to enforce a max-red limit the policy wasn't trained with)")
     parser.add_argument("--network", choices=list(NETWORKS), default="1x2",
                         help="road network (1x2 corridor or 4x4 grid); see scripts/scenarios.py")
+    parser.add_argument("--no-peds", action="store_true", help="turn pedestrians off (networks that have them)")
+    parser.add_argument("--ped-scale", type=float, default=1.0, help="multiply every crosswalk's pedestrian rate")
     parser.add_argument("--out", type=Path, default=None,
                         help="output directory (default results/evaluation, or results/evaluation_<network>)")
     args = parser.parse_args()
@@ -210,6 +234,11 @@ def main():
         for option in options:
             if option.startswith("max_red="):
                 policy_env[name]["max_red"] = int(option.split("=", 1)[1])
+    if args.controllers is None:
+        if NETWORKS[args.network].get("signal_plan"):
+            args.controllers = ["fixed_plan", "fixed_time", "actuated", "max_pressure"]
+        else:
+            args.controllers = [c for c in BASELINES if c != "fixed_plan"]
     controllers = list(args.controllers) + list(policies)
     if args.out is None:
         args.out = DEFAULT_OUT if args.network == "1x2" else REPO_ROOT / "results" / f"evaluation_{args.network}"
@@ -226,11 +255,14 @@ def main():
                 start = time.time()
                 if name in policies:
                     env = TimedSignalEnv(horizon=args.horizon, flow_file=flow_file, seed=seed, network=args.network,
-                                         **policy_env[name])
+                                         pedestrians=not args.no_peds, ped_scale=args.ped_scale, **policy_env[name])
                     metrics = run_policy_episode(env, policies[name])
                 else:
-                    env = TrafficSignalEnv(args.horizon, config_file=CONFIGS_DIR / NETWORKS[args.network]["config"],
-                                           flow_file=flow_file, seed=seed, save_replay=False)
+                    spec = NETWORKS[args.network]
+                    env = TrafficSignalEnv(args.horizon, config_file=CONFIGS_DIR / spec["config"],
+                                           flow_file=flow_file, seed=seed, save_replay=False,
+                                           pedestrians=spec.get("pedestrians") if not args.no_peds else None,
+                                           ped_scale=args.ped_scale, signal_plan=spec.get("signal_plan"))
                     metrics = run_episode(env, BASELINES[name]())
                 rows.append({"scenario": scenario, "seed": seed, "controller": name, **metrics})
                 print(f"{scenario:>8} seed={seed} {name:>16}: travel time {metrics['avg_travel_time_s']:7.1f}s, "

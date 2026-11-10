@@ -30,7 +30,8 @@ def _resolve_path(path):
 
 
 class TrafficSignalEnv(MultiAgentEnv):
-    def __init__(self, max_steps, config_file=DEFAULT_CONFIG_FILE, road_network_file=None, save_replay=None, flow_file=None, seed=None):
+    def __init__(self, max_steps, config_file=DEFAULT_CONFIG_FILE, road_network_file=None, save_replay=None, flow_file=None, seed=None,
+                 pedestrians=None, ped_scale=1.0, signal_plan=None):
         super().__init__()
         self.max_steps = max_steps
         self.config_file = _resolve_path(config_file)
@@ -59,6 +60,14 @@ class TrafficSignalEnv(MultiAgentEnv):
 
         self.intersections, self.roads, self.incoming_roads = self._parse_network(self.road_network_file)
         self.num_intersections = len(self.intersections)
+        # Optional pedestrian layer (scripts/pedestrians.py): a pedestrians.json path relative to configs/.
+        self.peds = None
+        if pedestrians:
+            from pedestrians import Pedestrians
+            self.peds = Pedestrians(CONFIGS_DIR / pedestrians, self.intersections, rate_scale=ped_scale)
+        # Optional estimated signal plan (configs/<network>/signal_plan.json), used by
+        # the fixed_plan and actuated baselines.
+        self.signal_plan = json.loads((CONFIGS_DIR / signal_plan).read_text()) if signal_plan else None
         self.num_roads = len(self.roads)
         self.num_lanes = sum(len(lanes) for lanes in self.roads.values())
         # Observation per lane on incoming roads: vehicle count and waiting count.
@@ -73,8 +82,10 @@ class TrafficSignalEnv(MultiAgentEnv):
         self.observation_space = spaces.Dict({
             agent: spaces.Box(low=0, high=np.inf, shape=(self.max_lanes,), dtype=np.float32) for agent in self.agents
         })
+        # Lightphases 0-8 are the selectable ones; any beyond (pedestrian WALK
+        # variants) are shown by the pedestrian layer only.
         self.action_space = spaces.Dict({
-            agent: spaces.Discrete(len(self.intersections[i]["trafficLight"]["lightphases"])) for i, agent in enumerate(self.agents)
+            agent: spaces.Discrete(min(9, len(self.intersections[i]["trafficLight"]["lightphases"]))) for i, agent in enumerate(self.agents)
         })
 
     def _make_engine(self, flow_file=None, seed=None):
@@ -84,6 +95,7 @@ class TrafficSignalEnv(MultiAgentEnv):
             config["flowFile"] = str(flow_file)
         if seed is not None:
             config["seed"] = int(seed)
+        self._seed = config.get("seed", 0)
         if self._resolved_config is None:
             self._resolved_config = tempfile.NamedTemporaryFile("w", suffix=".json", prefix="cityflow_config_", delete=False)
             self._resolved_config.close()
@@ -92,6 +104,8 @@ class TrafficSignalEnv(MultiAgentEnv):
         self.engine = cityflow.Engine(self._resolved_config.name, thread_num=1)
 
     def _start_episode_stats(self):
+        if self.peds is not None:
+            self.peds.reset(self._seed)
         self._queue_samples = []
         self._seen_vehicles = set()
         # Per-vehicle worst-case tracking: total seconds stopped, the longest
@@ -156,6 +170,7 @@ class TrafficSignalEnv(MultiAgentEnv):
             "throughput": throughput,
             "completion_rate": throughput / len(self._seen_vehicles) if self._seen_vehicles else float("nan"),
             **self._worst_case_metrics(),
+            **(self.peds.metrics(self.engine.get_current_time()) if self.peds is not None else {}),
         }
 
     def _worst_case_metrics(self):
@@ -183,10 +198,16 @@ class TrafficSignalEnv(MultiAgentEnv):
         return observations, {}
 
     def step(self, actions):
+        now = self.engine.get_current_time()
         for agent_id, action in actions.items():
             intersection_idx = int(agent_id.split("_")[1])
-            self.engine.set_tl_phase(self.intersections[intersection_idx]["id"], int(action))
+            phase = int(action)
+            if self.peds is not None:
+                phase = self.peds.display(intersection_idx, now, phase)
+            self.engine.set_tl_phase(self.intersections[intersection_idx]["id"], phase)
         self.engine.next_step()
+        if self.peds is not None:
+            self.peds.arrive(now)
 
         # Query lane statistics once per step instead of once per lane.
         lane_vehicle_counts = self.engine.get_lane_vehicle_count()

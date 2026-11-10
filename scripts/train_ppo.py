@@ -84,7 +84,7 @@ def main():
     parser.add_argument("--gamma", type=float, default=0.95,
                         help="discount per 5 s decision; 0.95 looks roughly 100 s ahead")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--network", choices=["1x2", "4x4"], default="1x2")
+    parser.add_argument("--network", choices=["1x2", "4x4", "calaveras"], default="1x2")
     parser.add_argument("--batch-size", type=int, default=4000)
     parser.add_argument("--count-steps-by", choices=["env_steps", "agent_steps"], default="env_steps",
                         help="unit of --batch-size; on the 4x4 grid one env step is 16 agent steps")

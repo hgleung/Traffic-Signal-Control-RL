@@ -1,0 +1,108 @@
+{
+ "level_high_means": "estimated 2024 PM peak hour",
+ "entry_veh_per_hour": {
+  "intersection_abel:W": 1650,
+  "intersection_milpitas:E": 1000,
+  "intersection_abel:S": 1000,
+  "intersection_abel:N": 1100,
+  "intersection_main_carlo:S": 200,
+  "intersection_milpitas:S": 600,
+  "intersection_milpitas:N": 600
+ },
+ "turn_shares_left_through_right": {
+  "intersection_abel:W": [
+   0.08,
+   0.7,
+   0.22
+  ],
+  "intersection_abel:E": [
+   0.1,
+   0.75,
+   0.15
+  ],
+  "intersection_abel:S": [
+   0.45,
+   0.35,
+   0.2
+  ],
+  "intersection_abel:N": [
+   0.25,
+   0.3,
+   0.45
+  ],
+  "intersection_main_carlo:W": [
+   0.0,
+   1.0,
+   0.0
+  ],
+  "intersection_main_carlo:E": [
+   0.15,
+   0.85,
+   0.0
+  ],
+  "intersection_main_carlo:S": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "intersection_milpitas:W": [
+   0.12,
+   0.72,
+   0.16
+  ],
+  "intersection_milpitas:E": [
+   0.18,
+   0.7,
+   0.12
+  ],
+  "intersection_milpitas:S": [
+   0.25,
+   0.55,
+   0.2
+  ],
+  "intersection_milpitas:N": [
+   0.25,
+   0.55,
+   0.2
+  ]
+ },
+ "entry_roads": {
+  "intersection_abel:W": "road_west_abel_0",
+  "intersection_milpitas:E": "road_east_milpitas_2",
+  "intersection_abel:S": "road_abel_s_abel_1",
+  "intersection_abel:N": "road_abel_n_abel_3",
+  "intersection_main_carlo:S": "road_main_carlo_s_main_carlo_1",
+  "intersection_milpitas:S": "road_milpitas_s_milpitas_1",
+  "intersection_milpitas:N": "road_milpitas_n_milpitas_3"
+ },
+ "expected_movement_veh_per_hour": {
+  "intersection_abel:EL": 82,
+  "intersection_abel:ER": 124,
+  "intersection_abel:ET": 618,
+  "intersection_abel:NL": 275,
+  "intersection_abel:NR": 495,
+  "intersection_abel:NT": 330,
+  "intersection_abel:SL": 450,
+  "intersection_abel:SR": 200,
+  "intersection_abel:ST": 350,
+  "intersection_abel:WL": 132,
+  "intersection_abel:WR": 363,
+  "intersection_abel:WT": 1155,
+  "intersection_main_carlo:EL": 146,
+  "intersection_main_carlo:ET": 824,
+  "intersection_main_carlo:SR": 200,
+  "intersection_main_carlo:WT": 1630,
+  "intersection_milpitas:EL": 180,
+  "intersection_milpitas:ER": 120,
+  "intersection_milpitas:ET": 700,
+  "intersection_milpitas:NL": 150,
+  "intersection_milpitas:NR": 120,
+  "intersection_milpitas:NT": 330,
+  "intersection_milpitas:SL": 150,
+  "intersection_milpitas:SR": 120,
+  "intersection_milpitas:ST": 330,
+  "intersection_milpitas:WL": 220,
+  "intersection_milpitas:WR": 293,
+  "intersection_milpitas:WT": 1318
+ }
+}
