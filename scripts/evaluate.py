@@ -55,6 +55,8 @@ def load_policy(checkpoint_dir, explore=False):
     explore=False takes the most likely action (deterministic); explore=True samples
     from the policy's action distribution, as during training.
     """
+    if str(checkpoint_dir) in RULE_POLICIES:
+        return RULE_POLICIES[str(checkpoint_dir)]()
     import os
     os.environ.setdefault("RLLIB_DISABLE_NEW_API_STACK", "True")
     from ray.rllib.policy.policy import Policy
@@ -74,8 +76,52 @@ def load_policy(checkpoint_dir, explore=False):
     return act
 
 
+def max_pressure_policy():
+    """Max-pressure as a TimedSignalEnv policy, so it can run under the same shields
+    as the RL agents. Every decision it requests the green phase with the largest
+    pressure (incoming minus mean outgoing vehicles over its non-right-turn movements);
+    the environment applies the minimum green and clearance rules."""
+    state = {}
+
+    def act(obs_batch):
+        env = state["env"]
+        if state.get("built") is not env:
+            state["movements"] = []
+            for intersection in env.intersections:
+                links = intersection["roadLinks"]
+                phases = {}
+                for p, phase in enumerate(intersection["trafficLight"]["lightphases"]):
+                    if p == 0:
+                        continue
+                    phases[p] = [([f"{links[k]['startRoad']}_{ll['startLaneIndex']}" for ll in links[k]["laneLinks"]],
+                                  [f"{links[k]['endRoad']}_{ll['endLaneIndex']}" for ll in links[k]["laneLinks"]])
+                                 for k in phase["availableRoadLinks"] if links[k]["type"] != "turn_right"]
+                state["movements"].append(phases)
+            state["built"] = env
+        counts = env.engine.get_lane_vehicle_count()
+        actions = []
+        for idx, phases in enumerate(state["movements"]):
+            def pressure(p):
+                return sum(sum(counts.get(l, 0) for l in set(a)) - np.mean([counts.get(l, 0) for l in b])
+                           for a, b in phases[p])
+            best = max(phases, key=pressure)
+            if pressure(env.phase[idx]) >= pressure(best):
+                best = env.phase[idx]  # keep the current phase on ties
+            actions.append(best - 1)
+        return actions
+
+    act.bind = lambda env: state.__setitem__("env", env)
+    act.env_config = {}
+    return act
+
+
+RULE_POLICIES = {"@max_pressure": max_pressure_policy}
+
+
 def run_policy_episode(env, act):
     """Run a trained policy on TimedSignalEnv (decisions every few seconds, timing rules enforced)."""
+    if hasattr(act, "bind"):
+        act.bind(env)
     obs, _ = env.reset()
     total_reward = 0.0
     done = False
