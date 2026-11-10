@@ -11,7 +11,15 @@ RL agents to the same rules as the baseline controllers:
 * a green must run for at least `min_green` seconds (default 10) before it can
   change; requests made earlier are ignored, and the observation tells the agent
   whether it can switch,
-* every change goes through `clearance` seconds (default 5) of phase 0.
+* every change goes through `clearance` seconds (default 5) of phase 0,
+* optionally (`max_red`, off by default), no lane may hold a stopped vehicle at
+  red for more than `max_red` seconds. Once a lane reaches that limit and the
+  current green has run its minimum, the environment overrides the agent and
+  switches to the green that serves the most overdue lanes. Real controllers
+  bound red times the same way (a maximum green per phase, or a maximum wait),
+  and without it the agents can leave a quiet approach at red for minutes.
+  With `wait_obs`, the observation also gives each incoming lane's red time
+  so far as a fraction of `max_red`, so the agent can see the limit coming.
 
 Rewards (per agent, averaged over the seconds in a decision step):
   "queue"    -(waiting vehicles on the intersection's incoming lanes) / 10
@@ -37,7 +45,8 @@ TRAIN_SEEDS = range(1000, 1050)
 class TimedSignalEnv(TrafficSignalEnv):
     def __init__(self, horizon=3600, decision_interval=5, min_green=10, clearance=5, reward="queue",
                  flow_file=None, seed=None, train_levels=("low", "medium", "high"), train_seeds=TRAIN_SEEDS,
-                 rng_seed=None, save_replay=False, network="1x2", neighbors=False, **kwargs):
+                 rng_seed=None, save_replay=False, network="1x2", neighbors=False, max_red=None, wait_obs=False,
+                 **kwargs):
         self.horizon = horizon
         self.network = network
         if "config_file" not in kwargs:
@@ -55,6 +64,10 @@ class TimedSignalEnv(TrafficSignalEnv):
         self.min_green = min_green
         self.clearance = clearance
         self.reward_type = reward
+        if wait_obs and not max_red:
+            raise ValueError("wait_obs needs max_red")
+        self.max_red = max_red
+        self.wait_obs = wait_obs
 
         self.num_phases = [len(i["trafficLight"]["lightphases"]) for i in self.intersections]
         self.num_green = max(self.num_phases) - 1  # phases 1..n-1
@@ -67,6 +80,16 @@ class TimedSignalEnv(TrafficSignalEnv):
             out_roads = [r for r in intersection["roads"] if r not in self.incoming_roads[idx]]
             self.outgoing_lanes.append([lane for road in out_roads for lane in self.roads[road]])
         self.n_lanes = max(len(lanes) for lanes in self.incoming_lanes)
+        # Incoming lanes that each green phase lets through.
+        self.phase_lanes = []
+        for intersection in self.intersections:
+            links = intersection["roadLinks"]
+            lightphases = intersection["trafficLight"]["lightphases"]
+            self.phase_lanes.append({
+                p: {f"{links[k]['startRoad']}_{ll['startLaneIndex']}"
+                    for k in lightphases[p]["availableRoadLinks"] for ll in links[k]["laneLinks"]}
+                for p in range(1, len(lightphases))
+            })
         # Per incoming lane: vehicle count and waiting count; then current-phase
         # one-hot, "can switch now" and "in clearance" flags.
         self.obs_size = 2 * self.n_lanes + self.num_green + 2
@@ -78,6 +101,8 @@ class TimedSignalEnv(TrafficSignalEnv):
         self.neighbor_of = self._find_neighbors()
         if neighbors:
             self.obs_size += 4 * 4
+        if wait_obs:
+            self.obs_size += self.n_lanes
         self.observation_space = spaces.Dict({
             agent: spaces.Box(low=0.0, high=np.inf, shape=(self.obs_size,), dtype=np.float32) for agent in self.agents
         })
@@ -103,6 +128,9 @@ class TimedSignalEnv(TrafficSignalEnv):
         self.green_elapsed = [0] * n
         self.clearance_left = [0] * n
         self.next_phase = [None] * n
+        # Seconds each incoming lane has had a stopped vehicle while not served by a green.
+        self.red_age = [dict.fromkeys(lanes, 0) for lanes in self.incoming_lanes]
+        self.forced_switches = 0
         self.previous_vehicle_count = self.engine.get_vehicle_count()
         return self._observations(), {}
 
@@ -110,6 +138,10 @@ class TimedSignalEnv(TrafficSignalEnv):
         for agent, action in actions.items():
             idx = int(agent.split("_")[1])
             desired = int(action) + 1
+            forced = self._forced_phase(idx)
+            if forced is not None:
+                self.forced_switches += int(forced != desired)
+                desired = forced
             if desired >= self.num_phases[idx]:
                 continue
             if self.clearance_left[idx] == 0 and self.green_elapsed[idx] >= self.min_green and desired != self.phase[idx]:
@@ -135,6 +167,8 @@ class TimedSignalEnv(TrafficSignalEnv):
                 else:
                     self.green_elapsed[idx] += 1
             waiting = self.engine.get_lane_waiting_vehicle_count()
+            if self.max_red:
+                self._update_red_age(waiting)
             self._record_second(waiting)
             reward_sum += self._step_rewards(waiting)
             if self.engine.get_current_time() >= self.horizon:
@@ -150,6 +184,27 @@ class TimedSignalEnv(TrafficSignalEnv):
         return self._observations(), rewards, terminateds, truncateds, {}
 
     # ------------------------------------------------------------------ helpers
+    def _update_red_age(self, waiting):
+        for idx, ages in enumerate(self.red_age):
+            served = () if self.clearance_left[idx] > 0 else self.phase_lanes[idx][self.phase[idx]]
+            for lane in ages:
+                ages[lane] = 0 if lane in served or waiting.get(lane, 0) == 0 else ages[lane] + 1
+
+    def _forced_phase(self, idx):
+        """The green the max-red rule imposes on intersection idx now, or None."""
+        if not self.max_red or self.clearance_left[idx] > 0 or self.green_elapsed[idx] < self.min_green:
+            return None
+        ages = self.red_age[idx]
+        if max(ages.values(), default=0) < self.max_red:
+            return None
+        overdue = {lane: age for lane, age in ages.items() if age >= self.max_red}
+        # Among phases serving an overdue lane, pick the one with the most overdue red time.
+        def score(p):
+            lanes = self.phase_lanes[idx][p]
+            return sum(a for l, a in overdue.items() if l in lanes), sum(a for l, a in ages.items() if l in lanes)
+        best = max(self.phase_lanes[idx], key=score)
+        return best if score(best)[0] > 0 else None
+
     def _find_neighbors(self):
         """neighbor_of[idx][d] = index of the signalised intersection reached by
         leaving idx in direction d (0 east, 1 north, 2 west, 3 south), or None."""
@@ -192,6 +247,9 @@ class TimedSignalEnv(TrafficSignalEnv):
                         continue
                     for k, road in enumerate(self.incoming_roads[other][:4]):
                         vec[offset + 4 * d + k] = sum(waiting.get(l, 0) for l in self.roads[road]) / LANE_SCALE
+            if self.wait_obs:
+                offset = self.obs_size - n_lanes
+                vec[offset:offset + n] = [min(self.red_age[idx][l] / self.max_red, 1.0) for l in lanes]
             obs[agent] = vec
         return obs
 
