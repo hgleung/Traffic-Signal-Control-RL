@@ -59,6 +59,19 @@ class TrafficSignalEnv(MultiAgentEnv):
 
         self.intersections, self.roads, self.incoming_roads = self._parse_network(self.road_network_file)
         self.num_intersections = len(self.intersections)
+        self.incoming_lanes = [
+            [lane for road in self.incoming_roads[i] for lane in self.roads[road]]
+            for i in range(self.num_intersections)
+        ]
+        # Incoming lanes that each phase (including the clearance phase 0) lets through.
+        self.served_lanes = []
+        for intersection in self.intersections:
+            links = intersection["roadLinks"]
+            self.served_lanes.append([
+                frozenset(f"{links[k]['startRoad']}_{ll['startLaneIndex']}"
+                          for k in phase["availableRoadLinks"] for ll in links[k]["laneLinks"])
+                for phase in intersection["trafficLight"]["lightphases"]
+            ])
         self.num_roads = len(self.roads)
         self.num_lanes = sum(len(lanes) for lanes in self.roads.values())
         # Observation per lane on incoming roads: vehicle count and waiting count.
@@ -102,11 +115,29 @@ class TrafficSignalEnv(MultiAgentEnv):
         self._entered_at = {}
         self._left_at = {}
         self._in_network = set()
+        # Seconds each incoming lane has had a stopped vehicle while its light was red.
+        self.red_age = [dict.fromkeys(lanes, 0) for lanes in self.incoming_lanes]
+        self._max_red_age = 0
+        self._last_shown = [0] * self.num_intersections
 
-    def _record_second(self, lane_waiting_counts=None):
-        """Track traffic outcomes after every simulated second (see episode_metrics)."""
+    def _record_second(self, lane_waiting_counts=None, shown_phases=None):
+        """Track traffic outcomes after every simulated second (see episode_metrics).
+
+        shown_phases: the phase each intersection showed during this second, used to
+        track how long each lane has been held at red (max_red_s).
+        """
         if lane_waiting_counts is None:
             lane_waiting_counts = self.engine.get_lane_waiting_vehicle_count()
+        if shown_phases is not None:
+            for idx, ages in enumerate(self.red_age):
+                served = self.served_lanes[idx][shown_phases[idx]]
+                for lane in ages:
+                    if lane in served or lane_waiting_counts.get(lane, 0) == 0:
+                        ages[lane] = 0
+                    else:
+                        ages[lane] += 1
+                        if ages[lane] > self._max_red_age:
+                            self._max_red_age = ages[lane]
         self._queue_samples.append(np.mean([
             sum(lane_waiting_counts.get(lane, 0) for road in self.incoming_roads[i] for lane in self.roads[road])
             for i in range(self.num_intersections)
@@ -145,6 +176,8 @@ class TrafficSignalEnv(MultiAgentEnv):
                            in the network
         max_stop_s:        the longest single uninterrupted stop of any vehicle, i.e.
                            the longest any one car sat at a light without moving
+        max_red_s:         the longest any incoming lane held a stopped vehicle at red
+                           (the quantity a maximum-red rule bounds)
         p95_trip_s / max_trip_s:
                            95th percentile / maximum travel time of completed trips
         """
@@ -166,6 +199,7 @@ class TrafficSignalEnv(MultiAgentEnv):
             "p95_wait_s": float(np.percentile(waits, 95)) if waits.size else 0.0,
             "max_wait_s": float(waits.max()) if waits.size else 0.0,
             "max_stop_s": float(max(self._longest_stop.values(), default=0)),
+            "max_red_s": float(self._max_red_age),
             "p95_trip_s": float(np.percentile(trips, 95)) if trips.size else 0.0,
             "max_trip_s": float(trips.max()) if trips.size else 0.0,
         }
@@ -191,7 +225,9 @@ class TrafficSignalEnv(MultiAgentEnv):
         # Query lane statistics once per step instead of once per lane.
         lane_vehicle_counts = self.engine.get_lane_vehicle_count()
         lane_waiting_counts = self.engine.get_lane_waiting_vehicle_count()
-        self._record_second(lane_waiting_counts)
+        shown = [int(actions.get(f"agent_{i}", self.engine_phase(i))) for i in range(self.num_intersections)]
+        self._last_shown = shown
+        self._record_second(lane_waiting_counts, shown)
         observations = {
             f"agent_{i}": self._get_observation_for_agent(i, lane_vehicle_counts, lane_waiting_counts)
             for i in range(self.num_intersections)
@@ -207,6 +243,10 @@ class TrafficSignalEnv(MultiAgentEnv):
         infos = {}
 
         return observations, rewards, terminateds, truncateds, infos
+
+    def engine_phase(self, idx):
+        """The phase last set at intersection idx (CityFlow has no getter for it)."""
+        return getattr(self, "_last_shown", [0] * self.num_intersections)[idx]
 
     def _parse_network(self, road_network_file):
         with open(road_network_file, "r") as f:

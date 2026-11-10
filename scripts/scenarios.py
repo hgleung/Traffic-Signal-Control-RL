@@ -59,6 +59,31 @@ NETWORKS = {
         "arterial_rows": (2, 3),
     },
 }
+# Real-world benchmarks used throughout the RL signal-control literature
+# (PressLight, CoLight, MPLight, Advanced-XLight): one hour of traffic recorded by
+# cameras in Hangzhou (4x4 intersections) and Jinan (3x4). Download them with
+# scripts/download_real_networks.py. "Levels" are the published flow files.
+# Seed 0 runs a file exactly; any other seed runs a perturbed copy (see
+# _perturbed_flows), which is how agents are trained without seeing the test traffic.
+REAL_DIR = "real"
+NETWORKS["hangzhou"] = {
+    "config": "real/hangzhou_config.json",
+    "roadnet": "real/hangzhou/roadnet_4_4.json",
+    "levels": {"real": "real/hangzhou/anon_4_4_hangzhou_real.json",
+               "peak": "real/hangzhou/anon_4_4_hangzhou_real_5816.json"},
+}
+NETWORKS["jinan"] = {
+    "config": "real/jinan_config.json",
+    "roadnet": "real/jinan/roadnet_3_4.json",
+    "levels": {"real": "real/jinan/anon_3_4_jinan_real.json",
+               "2000": "real/jinan/anon_3_4_jinan_real_2000.json",
+               "2500": "real/jinan/anon_3_4_jinan_real_2500.json"},
+}
+REAL_NETWORKS = ("hangzhou", "jinan")
+PERTURB_DROP = 0.1     # share of recorded vehicles removed in a perturbed copy
+PERTURB_DUP = 0.1      # share duplicated (with a new departure time)
+PERTURB_SHIFT = 60     # seconds; departures are jittered by up to this much
+
 ARTERIAL_FACTOR = 2.0
 RUSH_HOUR = (0.6, 1.4)  # demand multiplier at the start/end and at the peak
 MAX_ROUTE_ROADS = 12
@@ -161,6 +186,14 @@ def generate_flow(level, seed, horizon, roadnet_file=DEFAULT_ROADNET, cache=Fals
         if network != "1x2":
             raise ValueError("the original flow file only exists for the 1x2 network")
         return ORIGINAL_FLOW_FILE
+    if network in REAL_NETWORKS:
+        recorded = NETWORKS[network]["levels"][level]
+        if seed == 0:
+            return recorded
+        path = GENERATED_DIR / f"flow_{network}_{level}_seed{seed}_h{horizon}.json"
+        if cache and path.exists():
+            return path.relative_to(CONFIGS_DIR).as_posix()
+        return _write_flows(_perturbed_flows(CONFIGS_DIR / recorded, seed, horizon), path)
     prefix = "flow" if network == "1x2" else f"flow_{network}"
     path = GENERATED_DIR / f"{prefix}_{level}_seed{seed}_h{horizon}.json"
     if cache and path.exists():
@@ -184,6 +217,23 @@ def generate_flow(level, seed, horizon, roadnet_file=DEFAULT_ROADNET, cache=Fals
             t += rng.exponential(1.0 / rate)
     flows.sort(key=lambda f: f["startTime"])
     return _write_flows(flows, path)
+
+
+def _perturbed_flows(recorded_file, seed, horizon):
+    """A random variation of a recorded flow file: drop some vehicles, duplicate others,
+    and jitter every departure time, keeping each vehicle's recorded route."""
+    with open(recorded_file) as f:
+        recorded = json.load(f)
+    rng = np.random.default_rng(seed)
+    flows = []
+    for vehicle in recorded:
+        copies = 0 if rng.random() < PERTURB_DROP else 1
+        copies += int(rng.random() < PERTURB_DUP)
+        for _ in range(copies):
+            t = int(np.clip(vehicle["startTime"] + rng.integers(-PERTURB_SHIFT, PERTURB_SHIFT + 1), 0, horizon - 1))
+            flows.append({**vehicle, "startTime": t, "endTime": t})
+    flows.sort(key=lambda f: f["startTime"])
+    return flows
 
 
 def _write_flows(flows, path):
