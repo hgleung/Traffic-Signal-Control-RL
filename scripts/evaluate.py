@@ -118,6 +118,15 @@ def max_pressure_policy():
 RULE_POLICIES = {"@max_pressure": max_pressure_policy}
 
 
+def make_baseline(spec):
+    """'actuated' or 'actuated:max_green=25,passage_time=2' -> a controller instance."""
+    base, _, options = spec.partition(":")
+    if base not in BASELINES:
+        raise SystemExit(f"unknown controller {base!r} (choose from {list(BASELINES)})")
+    kwargs = {k: float(v) if "." in v else int(v) for k, v in (o.split("=") for o in options.split(",") if o)}
+    return BASELINES[base](**kwargs)
+
+
 def run_policy_episode(env, act):
     """Run a trained policy on TimedSignalEnv (decisions every few seconds, timing rules enforced)."""
     if hasattr(act, "bind"):
@@ -228,7 +237,9 @@ def main():
     parser.add_argument("--scenarios", nargs="+", default=None,
                         help="demand levels (low/medium/high/original), or recorded flow files on the real "
                              "networks (default: all of the network's)")
-    parser.add_argument("--controllers", nargs="+", default=list(BASELINES), choices=list(BASELINES))
+    parser.add_argument("--controllers", nargs="*", default=list(BASELINES),
+                        help=f"baselines from {list(BASELINES)}; settings can follow a colon, "
+                             "e.g. actuated:max_green=25")
     parser.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     parser.add_argument("--horizon", type=int, default=3600, help="episode length in simulated seconds")
     parser.add_argument("--policy", nargs="+", default=[], metavar="NAME=CHECKPOINT",
@@ -287,7 +298,7 @@ def main():
                 else:
                     env = TrafficSignalEnv(args.horizon, config_file=CONFIGS_DIR / NETWORKS[args.network]["config"],
                                            flow_file=flow_file, seed=seed, save_replay=False)
-                    metrics = run_episode(env, BASELINES[name]())
+                    metrics = run_episode(env, make_baseline(name))
                 rows.append({"scenario": scenario, "seed": seed, "controller": name,
                              **{m: metrics.get(m, 0.0) for m in METRICS}})
                 print(f"{scenario:>8} seed={seed} {name:>16}: travel time {metrics['avg_travel_time_s']:7.1f}s, "
