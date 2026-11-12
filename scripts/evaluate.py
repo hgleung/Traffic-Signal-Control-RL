@@ -25,12 +25,12 @@ from pathlib import Path
 import numpy as np
 
 from controllers import BASELINES
-from scenarios import DEMAND_LEVELS, NETWORKS, ORIGINAL_SCENARIO, generate_flow
+from scenarios import NETWORKS, ORIGINAL_SCENARIO, generate_flow
 from signal_env import TimedSignalEnv
 from traffic_env import CONFIGS_DIR, REPO_ROOT, TrafficSignalEnv
 
 METRICS = ["avg_travel_time_s", "avg_queue", "throughput", "completion_rate", "p95_wait_s", "max_wait_s",
-           "max_stop_s", "p95_trip_s", "max_trip_s", "total_reward"]
+           "max_stop_s", "max_red_s", "p95_trip_s", "max_trip_s", "intervention_rate", "total_reward"]
 DEFAULT_OUT = REPO_ROOT / "results" / "evaluation"
 
 
@@ -55,6 +55,8 @@ def load_policy(checkpoint_dir, explore=False):
     explore=False takes the most likely action (deterministic); explore=True samples
     from the policy's action distribution, as during training.
     """
+    if str(checkpoint_dir) in RULE_POLICIES:
+        return RULE_POLICIES[str(checkpoint_dir)]()
     import os
     os.environ.setdefault("RLLIB_DISABLE_NEW_API_STACK", "True")
     from ray.rllib.policy.policy import Policy
@@ -74,8 +76,61 @@ def load_policy(checkpoint_dir, explore=False):
     return act
 
 
+def max_pressure_policy():
+    """Max-pressure as a TimedSignalEnv policy, so it can run under the same shields
+    as the RL agents. Every decision it requests the green phase with the largest
+    pressure (incoming minus mean outgoing vehicles over its non-right-turn movements);
+    the environment applies the minimum green and clearance rules."""
+    state = {}
+
+    def act(obs_batch):
+        env = state["env"]
+        if state.get("built") is not env:
+            state["movements"] = []
+            for intersection in env.intersections:
+                links = intersection["roadLinks"]
+                phases = {}
+                for p, phase in enumerate(intersection["trafficLight"]["lightphases"]):
+                    if p == 0:
+                        continue
+                    phases[p] = [([f"{links[k]['startRoad']}_{ll['startLaneIndex']}" for ll in links[k]["laneLinks"]],
+                                  [f"{links[k]['endRoad']}_{ll['endLaneIndex']}" for ll in links[k]["laneLinks"]])
+                                 for k in phase["availableRoadLinks"] if links[k]["type"] != "turn_right"]
+                state["movements"].append(phases)
+            state["built"] = env
+        counts = env.engine.get_lane_vehicle_count()
+        actions = []
+        for idx, phases in enumerate(state["movements"]):
+            def pressure(p):
+                return sum(sum(counts.get(l, 0) for l in set(a)) - np.mean([counts.get(l, 0) for l in b])
+                           for a, b in phases[p])
+            best = max(phases, key=pressure)
+            if pressure(env.phase[idx]) >= pressure(best):
+                best = env.phase[idx]  # keep the current phase on ties
+            actions.append(best - 1)
+        return actions
+
+    act.bind = lambda env: state.__setitem__("env", env)
+    act.env_config = {}
+    return act
+
+
+RULE_POLICIES = {"@max_pressure": max_pressure_policy}
+
+
+def make_baseline(spec):
+    """'actuated' or 'actuated:max_green=25,passage_time=2' -> a controller instance."""
+    base, _, options = spec.partition(":")
+    if base not in BASELINES:
+        raise SystemExit(f"unknown controller {base!r} (choose from {list(BASELINES)})")
+    kwargs = {k: float(v) if "." in v else int(v) for k, v in (o.split("=") for o in options.split(",") if o)}
+    return BASELINES[base](**kwargs)
+
+
 def run_policy_episode(env, act):
     """Run a trained policy on TimedSignalEnv (decisions every few seconds, timing rules enforced)."""
+    if hasattr(act, "bind"):
+        act.bind(env)
     obs, _ = env.reset()
     total_reward = 0.0
     done = False
@@ -134,8 +189,8 @@ def write_outputs(rows, summary, out_dir, scenarios, controllers):
         "Worst-case waits (per vehicle, mean ± std over seeds of each episode's value):",
         "",
         "| Scenario | Controller | 95th pct. time stopped (s) | Max time stopped (s) | Longest single stop (s) "
-        "| 95th pct. trip (s) | Longest trip (s) |",
-        "|---|---|---|---|---|---|---|",
+        "| Longest red with a car waiting (s) | 95th pct. trip (s) | Longest trip (s) |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for scenario in scenarios:
         for controller in controllers:
@@ -143,7 +198,7 @@ def write_outputs(rows, summary, out_dir, scenarios, controllers):
             lines.append(
                 f"| {scenario} | {controller} "
                 + "".join(f"| {s[m + '_mean']:.0f} ± {s[m + '_std']:.0f} "
-                          for m in ("p95_wait_s", "max_wait_s", "max_stop_s", "p95_trip_s", "max_trip_s"))
+                          for m in ("p95_wait_s", "max_wait_s", "max_stop_s", "max_red_s", "p95_trip_s", "max_trip_s"))
                 + "|"
             )
     table = "\n".join(lines) + "\n"
@@ -179,9 +234,12 @@ def write_outputs(rows, summary, out_dir, scenarios, controllers):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--scenarios", nargs="+", default=list(DEMAND_LEVELS) + [ORIGINAL_SCENARIO],
-                        choices=list(DEMAND_LEVELS) + [ORIGINAL_SCENARIO])
-    parser.add_argument("--controllers", nargs="+", default=list(BASELINES), choices=list(BASELINES))
+    parser.add_argument("--scenarios", nargs="+", default=None,
+                        help="demand levels (low/medium/high/original), or recorded flow files on the real "
+                             "networks (default: all of the network's)")
+    parser.add_argument("--controllers", nargs="*", default=list(BASELINES),
+                        help=f"baselines from {list(BASELINES)}; settings can follow a colon, "
+                             "e.g. actuated:max_green=25")
     parser.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     parser.add_argument("--horizon", type=int, default=3600, help="episode length in simulated seconds")
     parser.add_argument("--policy", nargs="+", default=[], metavar="NAME=CHECKPOINT",
@@ -206,15 +264,24 @@ def main():
         # Run each policy under the rules it was trained with, unless overridden.
         policy_env[name] = {"neighbors": bool(act.env_config.get("neighbors", False)),
                             "max_red": act.env_config.get("max_red"),
-                            "wait_obs": bool(act.env_config.get("wait_obs", False))}
+                            "wait_obs": bool(act.env_config.get("wait_obs", False)),
+                            "shield": act.env_config.get("shield")}
         for option in options:
             if option.startswith("max_red="):
                 policy_env[name]["max_red"] = int(option.split("=", 1)[1])
+            elif option.startswith("shield="):
+                policy_env[name]["shield"] = option.split("=", 1)[1]
+        if policy_env[name]["shield"] == "none" and not policy_env[name]["wait_obs"]:
+            policy_env[name]["shield"] = None  # tracking only; no limit to enforce
     controllers = list(args.controllers) + list(policies)
     if args.out is None:
         args.out = DEFAULT_OUT if args.network == "1x2" else REPO_ROOT / "results" / f"evaluation_{args.network}"
-    if args.network != "1x2":
-        args.scenarios = [s for s in args.scenarios if s != ORIGINAL_SCENARIO]
+    levels = list(NETWORKS[args.network]["levels"])
+    if args.scenarios is None:
+        args.scenarios = levels + ([ORIGINAL_SCENARIO] if args.network == "1x2" else [])
+    for scenario in args.scenarios:
+        if scenario not in levels and not (scenario == ORIGINAL_SCENARIO and args.network == "1x2"):
+            parser.error(f"unknown scenario {scenario!r} for network {args.network} (choose from {levels})")
 
     rows = []
     for scenario in args.scenarios:
@@ -231,8 +298,9 @@ def main():
                 else:
                     env = TrafficSignalEnv(args.horizon, config_file=CONFIGS_DIR / NETWORKS[args.network]["config"],
                                            flow_file=flow_file, seed=seed, save_replay=False)
-                    metrics = run_episode(env, BASELINES[name]())
-                rows.append({"scenario": scenario, "seed": seed, "controller": name, **metrics})
+                    metrics = run_episode(env, make_baseline(name))
+                rows.append({"scenario": scenario, "seed": seed, "controller": name,
+                             **{m: metrics.get(m, 0.0) for m in METRICS}})
                 print(f"{scenario:>8} seed={seed} {name:>16}: travel time {metrics['avg_travel_time_s']:7.1f}s, "
                       f"queue {metrics['avg_queue']:6.2f}, throughput {metrics['throughput']:5d} "
                       f"({time.time() - start:.1f}s)")

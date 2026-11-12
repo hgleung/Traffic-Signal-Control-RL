@@ -18,3 +18,5 @@ __pycache__/
 Thumbs.db
 # Generated traffic scenarios and evaluation scratch output
 configs/generated/
+# Real-world benchmark data (scripts/download_real_networks.py)
+configs/real/*/
